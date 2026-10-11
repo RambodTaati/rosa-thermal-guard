@@ -7,7 +7,7 @@
 تطبيق صغير في علبة النظام في Windows يُبقي **حرارة المعالج وبطاقة الرسومات دون 100 درجة مئوية**.
 عندما ترتفع الحرارة يُبطئ العمل تدريجيًا، وعندما تنخفض يُعيد السرعة الكاملة.
 
-![Rosa Thermal Guard](../../releases/download/v1.0.0/screenshot-ar.png)
+![Rosa Thermal Guard](../../releases/download/v1.0.1/screenshot-ar.png)
 
 ## المزايا
 - عرض مباشر لحرارة المعالج وبطاقة الرسومات بمؤشرات دائرية ورسم بياني لآخر 5 دقائق
@@ -27,7 +27,7 @@
 - تعريف NVIDIA مع `nvidia-smi` للتحكم في بطاقة الرسومات (اختياري)
 
 ## التثبيت
-نزّل `RosaThermalGuard-Setup-1.0.0.exe` من صفحة Releases، وتحقّق منه باستخدام `SHA256SUMS.txt`، ثم شغّله.
+نزّل `RosaThermalGuard-Setup-1.0.1.exe` من صفحة Releases، وتحقّق منه باستخدام `SHA256SUMS.txt`، ثم شغّله.
 
 > المثبّت **غير موقَّع رقميًا**، لذا قد يعرض SmartScreen في Windows تحذيرًا.
 > إذا كنت تثق بهذا الإصدار (تحقّق من SHA-256 أولًا) فاضغط **More info ← Run anyway**.

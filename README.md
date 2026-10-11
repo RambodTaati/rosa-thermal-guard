@@ -5,7 +5,7 @@
 A small Windows tray app that keeps your **CPU and GPU below 100 °C**. When the chip gets hot it
 slows work down step by step; when it cools off it gives you full speed back.
 
-![Rosa Thermal Guard](../../releases/download/v1.0.0/screenshot-en.png)
+![Rosa Thermal Guard](../../releases/download/v1.0.1/screenshot-en.png)
 
 ## Features
 - Live CPU / GPU temperatures (LibreHardwareMonitor sensors), gauges and a 5-minute history graph
@@ -25,7 +25,7 @@ slows work down step by step; when it cools off it gives you full speed back.
 - NVIDIA driver with `nvidia-smi` for GPU control (optional)
 
 ## Install
-Download `RosaThermalGuard-Setup-1.0.0.exe` from the Releases page, check it against `SHA256SUMS.txt`, and run it.
+Download `RosaThermalGuard-Setup-1.0.1.exe` from the Releases page, check it against `SHA256SUMS.txt`, and run it.
 
 > The installer is **not code-signed**, so Windows SmartScreen may show "Windows protected your PC".
 > Click **More info → Run anyway** if you trust this release (verify the SHA-256 first).

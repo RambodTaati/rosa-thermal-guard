@@ -4,7 +4,7 @@
 
 一个小巧的 Windows 托盘程序，让 **CPU 和 GPU 温度始终低于 100 °C**。温度过高时逐级降速，降温后自动恢复全速。
 
-![Rosa Thermal Guard](../../releases/download/v1.0.0/screenshot-zh-CN.png)
+![Rosa Thermal Guard](../../releases/download/v1.0.1/screenshot-zh-CN.png)
 
 ## 功能
 - 实时显示 CPU / GPU 温度，环形仪表盘和最近 5 分钟曲线
@@ -24,7 +24,7 @@
 - 控制显卡需要带 `nvidia-smi` 的 NVIDIA 驱动（可选）
 
 ## 安装
-从 Releases 页面下载 `RosaThermalGuard-Setup-1.0.0.exe`，用 `SHA256SUMS.txt` 校验后运行。
+从 Releases 页面下载 `RosaThermalGuard-Setup-1.0.1.exe`，用 `SHA256SUMS.txt` 校验后运行。
 
 > 安装程序**没有数字签名**，Windows SmartScreen 可能会提示"Windows 已保护你的电脑"。
 > 如果你信任此版本（请先核对 SHA-256），点击 **更多信息 → 仍要运行**。

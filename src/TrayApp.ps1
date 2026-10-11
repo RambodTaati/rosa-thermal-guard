@@ -28,6 +28,14 @@ function Start-Guard {
 # ---------- tray icon ----------
 $script:iconHandle = [IntPtr]::Zero
 . (Join-Path $AppDir 'TrayIcon.ps1')
+if (-not ('RTG.Win' -as [type])) {
+  Add-Type -Namespace RTG -Name Win -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int cmd);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool IsIconic(System.IntPtr h);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool BringWindowToTop(System.IntPtr h);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
+"@
+}
 $script:iconSize = Get-TrayIconSize; $script:lightBar = Test-LightTaskbar; $script:lastTheme = Get-Date
 function Set-TrayIcon([string]$hex, [string]$text) {
   $bmp = New-TrayBitmap $hex $text $script:iconSize $script:lightBar
@@ -97,12 +105,24 @@ function Update-Graph {
   $ui.CpuLine.Points = $cp; $ui.GpuLine.Points = $gp
 }
 
-function Show-Window {
-  $wa = [Windows.SystemParameters]::WorkArea
-  $window.Left = $wa.Right - 400 - 4
-  $window.Show(); $window.UpdateLayout()
-  $window.Top = $wa.Bottom - $window.ActualHeight - 4
-  $window.Activate() | Out-Null
+# Shows the window, restores it if Windows left it minimized (iconic) and brings it to the front.
+# WPF can report IsVisible=True while the HWND is iconic (e.g. after Win+D / minimize -> Hide), so the
+# native state is checked and SW_RESTORE is used before positioning.
+function Show-Window([string]$why = '') {
+  try {
+    if ($window.WindowState -ne 'Normal') { $window.WindowState = 'Normal' }
+    $window.Show()
+    $h = (New-Object Windows.Interop.WindowInteropHelper $window).Handle
+    if ($h -ne [IntPtr]::Zero -and [RTG.Win]::IsIconic($h)) { [void][RTG.Win]::ShowWindow($h, 9) }   # SW_RESTORE
+    $wa = [Windows.SystemParameters]::WorkArea
+    $window.Left = $wa.Right - 400 - 4
+    $window.UpdateLayout()
+    $window.Top = $wa.Bottom - $window.ActualHeight - 4
+    $window.Topmost = $false; $window.Topmost = $true
+    if ($h -ne [IntPtr]::Zero) { [void][RTG.Win]::BringWindowToTop($h); [void][RTG.Win]::SetForegroundWindow($h) }
+    [void]$window.Activate()
+    if ($why) { UiLog "window shown ($why)" }
+  } catch { UiLog "show window error: $($_.Exception.Message)" }
 }
 function Toggle-Pause {
   if ($sync.PauseUntil -gt (Get-Date)) { $sync.PauseUntil = [datetime]::MinValue; UiLog 'resume clicked' }
@@ -284,7 +304,7 @@ function Switch-Language([string]$code) {
 }
 $notify.ContextMenuStrip = $menu
 Update-Menu
-$miOpen.Add_Click({ Show-Window })
+$miOpen.Add_Click({ Show-Window 'menu' })
 $miPause.Add_Click({ Toggle-Pause })
 $miLog.Add_Click({ Start-Process notepad.exe (Join-Path $Root 'guard.log') })
 $script:exiting = $false
@@ -302,8 +322,9 @@ function Exit-App {
   [Windows.Application]::Current.Shutdown()
 }
 $miExit.Add_Click({ Exit-App })
-$notify.Add_MouseClick({ if ($_.Button -eq 'Left') { if ($window.IsVisible) { $window.Hide() } else { Show-Window } } })
-$notify.Add_MouseDoubleClick({ Show-Window })
+# left-click / double-click always open the window (hide it with its own - / x buttons); right-click shows the menu
+$notify.Add_MouseClick({ if ($_.Button -eq [Windows.Forms.MouseButtons]::Left) { Show-Window 'tray click' } })
+$notify.Add_MouseDoubleClick({ if ($_.Button -eq [Windows.Forms.MouseButtons]::Left) { Show-Window 'tray double-click' } })
 Set-TrayIcon $TrayFill['wait'] ''
 $notify.Text = 'Rosa Thermal Guard'
 $notify.Visible = $true
@@ -369,7 +390,7 @@ $timer.Add_Tick({
     }
 
     # flags from outside (no admin needed)
-    if (Test-Path (Join-Path $Root 'show.flag')) { Remove-Item (Join-Path $Root 'show.flag') -Force; Show-Window }
+    if (Test-Path (Join-Path $Root 'show.flag')) { Remove-Item (Join-Path $Root 'show.flag') -Force; Show-Window 'show.flag' }
     if (Test-Path (Join-Path $Root 'snap.flag')) { Remove-Item (Join-Path $Root 'snap.flag') -Force; Show-Window; $script:snapPending = 3 }
     if ($script:snapPending -gt 0) {
       $script:snapPending--
