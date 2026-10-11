@@ -6,6 +6,9 @@
        lowers priority of the top CPU users at the critical threshold, restores when cool.
   GPU (NVIDIA): nvidia-smi -pl (power limit) when the driver allows it, otherwise
        nvidia-smi -lgc (graphics clock cap), otherwise process priority.
+  Fans (GIGABYTE laptops): before any throttling, switches the fans to maximum through GIGABYTE's own
+       ACPI-WMI interface (root\WMI GB_WMIACPI_Set, the one Control Center uses) and restores the
+       previous fan mode when cool, on exit, on uninstall and after a crash.
   All thresholds come from config.json next to this script.
   Switches: -TestMode (simulated temps, real actions, then restore)
             -Restore  (put saved original settings back and exit)
@@ -268,6 +271,75 @@ function Restore-Gpu {
   $script:GpuThrottled = $false
 }
 
+# ---- fans (GIGABYTE ACPI-WMI: root\WMI GB_WMIACPI_Get / GB_WMIACPI_Set, the interface Control Center uses) ----
+$cFan = CfgVal $Cfg 'fanBoost' $null
+$FAN_ON = [bool](CfgVal $cFan 'enabled' $true)
+$FAN_CPU = [double](CfgVal $cFan 'cpuC' 85)
+$FAN_GPU = [double](CfgVal $cFan 'gpuC' 83)
+$FAN_CPU_COOL = [double](CfgVal $cFan 'restoreCpuC' 75)
+$FAN_GPU_COOL = [double](CfgVal $cFan 'restoreGpuC' 73)
+$FAN_COOL_SECONDS = [int](CfgVal $cFan 'restoreAfterSeconds' 20)
+$FAN_DUTY = [int](CfgVal $cFan 'maxDuty' 229)   # 229 = 100 % duty on the GIGABYTE EC
+$FanStateFile = Join-Path $DataDir 'fanstate.json'   # previous fan mode while boosted (crash-safe)
+$script:FanOk = $false; $script:FanBoosted = $false; $script:FanInfo = $null
+function Fan-Get([string]$m) {
+  $i = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Get -ErrorAction Stop
+  return (Invoke-CimMethod -InputObject $i -MethodName $m -ErrorAction Stop).Data
+}
+function Fan-Set([string]$m, [int]$v) {
+  $i = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Set -ErrorAction Stop
+  [void](Invoke-CimMethod -InputObject $i -MethodName $m -Arguments @{ Data = [byte]$v } -ErrorAction Stop)
+}
+function Fan-Rpm([string]$m) { $v = [int](Fan-Get $m); return ((($v -band 0xFF) -shl 8) -bor ($v -shr 8)) }   # the EC returns RPM byte-swapped
+function Get-FanMode {
+  $f = @{ Fixed = [int](Fan-Get 'GetFixedFanStatus'); Step = [int](Fan-Get 'GetStepFanStatus'); Auto = [int](Fan-Get 'GetAutoFanStatus'); Speed = [int](Fan-Get 'GetFixedFanSpeed') }
+  if ($f.Fixed -eq 1) { $f.GpuDuty = [int](Fan-Get 'GetGPUFanDuty') }
+  return $f
+}
+function Init-Fan {
+  if (-not $FAN_ON) { Write-Log 'fan boost disabled in config.json'; return }
+  try {
+    $null = Get-CimClass -Namespace root\WMI -ClassName GB_WMIACPI_Set -ErrorAction Stop
+    $m = Get-FanMode; $r1 = Fan-Rpm 'getRpm1'; $r2 = Fan-Rpm 'getRpm2'
+    $script:FanOk = $true
+    Write-Log ("fan control: GIGABYTE ACPI-WMI found (fans {0}/{1} RPM, fixed={2} step={3} auto={4}) - MAX at CPU {5} / GPU {6} C, restore below {7} / {8} C for {9}s" -f $r1, $r2, $m.Fixed, $m.Step, $m.Auto, $FAN_CPU, $FAN_GPU, $FAN_CPU_COOL, $FAN_GPU_COOL, $FAN_COOL_SECONDS)
+  } catch { Write-Log 'fan control: GIGABYTE ACPI-WMI not available on this PC - fan boost off' }
+}
+function Read-Fan {
+  if (-not $FanOk) { return }
+  try {
+    $m = Get-FanMode
+    $mode = if ($m.Fixed -eq 1 -and $m.Speed -ge $FAN_DUTY) { 'max' } elseif ($m.Fixed -eq 1) { 'fixed' } elseif ($m.Auto -eq 1) { 'auto' } else { 'normal' }
+    $script:FanInfo = @{ Rpm1 = (Fan-Rpm 'getRpm1'); Rpm2 = (Fan-Rpm 'getRpm2'); Mode = $mode }
+  } catch { $script:FanInfo = $null }
+}
+function Fan-Boost([string]$why) {
+  try {
+    $prev = $null
+    if (-not (Test-Path $FanStateFile)) { $prev = Get-FanMode; $prev | ConvertTo-Json | Set-Content $FanStateFile -Encoding UTF8 }
+    Fan-Set 'SetCurrentFanStep' 0; Fan-Set 'SetAutoFanStatus' 0
+    Fan-Set 'SetFixedFanSpeed' $FAN_DUTY; Fan-Set 'SetGPUFanDuty' $FAN_DUTY
+    Fan-Set 'SetStepFanStatus' 1; Fan-Set 'SetFixedFanStatus' 1
+    $script:FanBoosted = $true
+    if ($prev) { Write-Log ("fan mode -> MAX ({0}); saved previous mode fixed={1} step={2} auto={3} speed={4}" -f $why, $prev.Fixed, $prev.Step, $prev.Auto, $prev.Speed) }
+    else { Write-Log "fan mode -> MAX ($why)" }
+  } catch { Write-Log "fan boost failed: $($_.Exception.Message)" }
+}
+function Restore-Fan([string]$why) {
+  if (-not (Test-Path $FanStateFile)) { $script:FanBoosted = $false; return }
+  try {
+    $p = Get-Content $FanStateFile -Raw | ConvertFrom-Json
+    Fan-Set 'SetCurrentFanStep' 0
+    Fan-Set 'SetFixedFanStatus' ([int]$p.Fixed); Fan-Set 'SetStepFanStatus' ([int]$p.Step)
+    Fan-Set 'SetFixedFanSpeed' ([int]$p.Speed)
+    if ([int]$p.Fixed -eq 1 -and $p.GpuDuty -ne $null) { Fan-Set 'SetGPUFanDuty' ([int]$p.GpuDuty) }
+    Fan-Set 'SetAutoFanStatus' ([int]$p.Auto)
+    Remove-Item $FanStateFile -Force -ErrorAction SilentlyContinue
+    Write-Log ("fan mode restored ({0}): fixed={1} step={2} auto={3} speed={4}" -f $why, $p.Fixed, $p.Step, $p.Auto, $p.Speed)
+  } catch { Write-Log "fan restore failed: $($_.Exception.Message)" }
+  $script:FanBoosted = $false
+}
+
 function Restore-All([string]$why) {
   Write-Log "restore all ($why)"
   if ($State) {
@@ -278,6 +350,7 @@ function Restore-All([string]$why) {
   }
   Restore-Gpu
   Restore-Priorities
+  if ($why -ne 'cooled down') { Restore-Fan $why }   # fans have their own, lower restore threshold
   $script:CpuLevel = 0
   Remove-Item $StateFile -Force -ErrorAction SilentlyContinue
   $script:State = $null
@@ -324,10 +397,12 @@ if (-not $Restore) {
 # leftovers from a crash/kill: put originals back first
 $prev = Load-State
 if ($prev) { $State = $prev; Restore-All 'previous run did not exit cleanly' }
+if (Test-Path $FanStateFile) { Restore-Fan 'previous run did not exit cleanly' }
 if ($Restore) { exit 0 }
 
 try { Open-Sensors } catch { Write-Log "cannot load LibreHardwareMonitor: $($_.Exception.Message)"; exit 2 }
 if (-not $isAdmin) { Write-Log 'WARNING: not running as admin - CPU temperatures need admin' }
+Init-Fan
 if ($HasNvidia) { Init-Nvidia } else { Write-Log 'no active NVIDIA/AMD GPU found by sensors (integrated GPU heat is covered by the CPU package sensor)' }
 
 if ($Once) { $t = Read-Temps; Write-Log ("CPU={0} GPU={1}" -f $t.Cpu, $t.Gpu); exit 0 }
@@ -345,6 +420,7 @@ if ($TestMode) {
 $coolSince = $null; $gpuCoolSince = $null; $lastStep = [datetime]::MinValue; $lastGpuStep = [datetime]::MinValue; $lastStepTemp = 0
 $restoreHold = $COOL_SECONDS; $lastFullRestore = $null; $wasPaused = $false
 $lastInfo = [datetime]::MinValue; $nullSince = $null; $lastRescan = Get-Date
+$fanCoolSince = $null; $lastFanFix = [datetime]::MinValue
 Write-Log "RosaThermalGuard started (admin=$isAdmin, poll=${PollSeconds}s, CPU hot=$CPU_HOT crit=$CPU_CRIT cool=$CPU_COOL, GPU hot=$GPU_HOT cool=$GPU_COOL)"
 $exitCode = 0
 try {
@@ -372,7 +448,7 @@ try {
       else {
         $paused = $true
         if (-not $wasPaused) { Write-Log "guard paused by user until $($Sync.PauseUntil.ToString('HH:mm'))" }
-        if ($CpuLevel -gt 0 -or $GpuThrottled -or $Reniced.Count -gt 0) { Restore-All 'paused by user' }
+        if ($CpuLevel -gt 0 -or $GpuThrottled -or $Reniced.Count -gt 0 -or $FanBoosted) { Restore-All 'paused by user' }
       }
     }
     if ($wasPaused -and -not $paused) { Write-Log 'guard resumed' }
@@ -432,8 +508,32 @@ try {
       }
     }
 
+    # fans: first line of defence, before any throttling (lower thresholds than CPU/GPU throttling)
+    if ($FanOk) {
+      Read-Fan
+      if ($paused) { $fanCoolSince = $null }
+      else {
+        $fanHot = ($cpu -ne $null -and $cpu -ge $FAN_CPU) -or ($gpu -ne $null -and $gpu -ge $FAN_GPU)
+        if ($fanHot) {
+          $fanCoolSince = $null
+          if (-not $FanBoosted) { Fan-Boost ("CPU {0} C, GPU {1} C" -f $cpu, $gpu); Read-Fan }
+          elseif ($FanInfo -and $FanInfo.Mode -ne 'max' -and ($now - $lastFanFix).TotalSeconds -ge 30) {
+            Write-Log "fan mode was changed outside Thermal Guard ($($FanInfo.Mode)) while still hot - MAX again"
+            Fan-Boost 're-apply'; $lastFanFix = $now; Read-Fan
+          }
+        } elseif ($FanBoosted) {
+          $fanCool = ($cpu -eq $null -or $cpu -lt $FAN_CPU_COOL) -and ($gpu -eq $null -or $gpu -lt $FAN_GPU_COOL) -and $CpuLevel -eq 0 -and -not $GpuThrottled
+          if (-not $fanCool) { $fanCoolSince = $null }
+          elseif (-not $fanCoolSince) { $fanCoolSince = $now }
+          elseif (($now - $fanCoolSince).TotalSeconds -ge $FAN_COOL_SECONDS) {
+            Write-Log "fans: cool for ${FAN_COOL_SECONDS}s (CPU $cpu C, GPU $gpu C)"; Restore-Fan 'cooled down'; $fanCoolSince = $null; Read-Fan
+          }
+        }
+      }
+    }
+
     if ($TestMode -or ($now - $lastInfo).TotalSeconds -ge 60 -or $CpuLevel -gt 0 -or $GpuThrottled) {
-      Write-Log ("temps CPU={0} GPU={1} level={2} gpuThrottled={3}{4}" -f $cpu, $gpu, $CpuLevel, $GpuThrottled, $(if ($TestMode -or $simActive) { " (SIM, $real)" } else { '' }))
+      Write-Log ("temps CPU={0} GPU={1} level={2} gpuThrottled={3}{5}{4}" -f $cpu, $gpu, $CpuLevel, $GpuThrottled, $(if ($TestMode -or $simActive) { " (SIM, $real)" } else { '' }), $(if ($FanInfo) { " fan=$($FanInfo.Mode) $($FanInfo.Rpm1)/$($FanInfo.Rpm2)rpm" } else { '' }))
       $lastInfo = $now
     }
     if ($CpuLevel -eq 0 -and $lastFullRestore -and ($now - $lastFullRestore).TotalSeconds -gt $HOLD_MAX -and $restoreHold -ne $COOL_SECONDS) { $restoreHold = $COOL_SECONDS; Write-Log 'stable at full speed - hold time reset' }
@@ -446,6 +546,8 @@ try {
       $Sync.Cpu = $cpu; $Sync.Gpu = $gpu; $Sync.Level = $CpuLevel; $Sync.MaxPct = $CPU_STEPS[$CpuLevel]
       $Sync.GpuThrottled = $GpuThrottled; $Sync.Paused = $paused; $Sync.HasNvidia = $HasNvidia; $Sync.Sim = $simActive
       $Sync.GpuMode = $(if ($Nv) { $Nv.Mode } else { $null }); $Sync.GpuLimitW = $(if ($Nv) { $Nv.Cur } else { $null }); $Sync.GpuDefaultW = $(if ($Nv) { $Nv.Default } else { $null }); $Sync.GpuClockCap = $(if ($Nv) { $Nv.LgcMhz } else { $null })
+      $Sync.FanOk = $FanOk; $Sync.FanBoost = $FanBoosted
+      if ($FanInfo) { $Sync.FanRpm1 = $FanInfo.Rpm1; $Sync.FanRpm2 = $FanInfo.Rpm2; $Sync.FanMode = $FanInfo.Mode } else { $Sync.FanMode = $null }
       $Sync.Reniced = $Reniced.Count; $Sync.Updated = Get-Date
       if ($Sync.Stop) { Write-Log 'exit requested from tray'; break }
     }

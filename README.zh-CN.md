@@ -4,13 +4,14 @@
 
 一个小巧的 Windows 托盘程序，让 **CPU 和 GPU 温度始终低于 100 °C**。温度过高时逐级降速，降温后自动恢复全速。
 
-![Rosa Thermal Guard](../../releases/download/v1.0.1/screenshot-zh-CN.png)
+![Rosa Thermal Guard](../../releases/download/v1.1.0/screenshot-zh-CN.png)
 
 ## 功能
 - 实时显示 CPU / GPU 温度，环形仪表盘和最近 5 分钟曲线
 - 托盘图标随状态变色：绿色 = 正常，橙色 = 正在降温，红色 = 过热，灰色 = 已暂停；悬停显示温度
 - 通过 Windows 电源计划限制 CPU（"最大处理器状态"，适用于所有核心类型，交流电与电池）
 - NVIDIA 显卡控制：驱动允许时降低功耗上限（`nvidia-smi -pl`），否则限制核心频率（`nvidia-smi -lgc`），再否则降低进程优先级
+- 技嘉（GIGABYTE）笔记本：在任何降频之前，通过技嘉自带的 ACPI-WMI 接口把风扇切换到最大（CPU 85 °C / GPU 83 °C），降温后（低于 75 / 73 °C 持续 20 秒）、退出时和卸载时恢复原来的风扇模式
 - CPU 温度达到临界值时降低最耗资源程序的优先级，不会改动系统进程
 - 退出、卸载或崩溃后都会恢复所有原始设置
 - 可从托盘菜单暂停 15 分钟（若 CPU 达到 97 °C 会自动取消暂停）
@@ -24,7 +25,7 @@
 - 控制显卡需要带 `nvidia-smi` 的 NVIDIA 驱动（可选）
 
 ## 安装
-从 Releases 页面下载 `RosaThermalGuard-Setup-1.0.1.exe`，用 `SHA256SUMS.txt` 校验后运行。
+从 Releases 页面下载 `RosaThermalGuard-Setup-1.1.0.exe`，用 `SHA256SUMS.txt` 校验后运行。
 
 > 安装程序**没有数字签名**，Windows SmartScreen 可能会提示"Windows 已保护你的电脑"。
 > 如果你信任此版本（请先核对 SHA-256），点击 **更多信息 → 仍要运行**。

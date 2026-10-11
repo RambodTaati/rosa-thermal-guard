@@ -190,6 +190,10 @@ $xamlText = @'
             <TextBlock Text="{{gpuCtl}}" Foreground="#FF8A91A5" FontSize="13"/>
             <TextBlock x:Name="GpuLimit" Text="—" Foreground="#FFF1F3F8" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
           </Grid>
+          <Grid Margin="0,6,0,2">
+            <TextBlock Text="{{fans}}" Foreground="#FF8A91A5" FontSize="13"/>
+            <TextBlock x:Name="FanVal" Text="-" Foreground="#FFF1F3F8" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+          </Grid>
         </StackPanel>
       </Border>
       <Grid Margin="0,14,0,6">
@@ -228,7 +232,7 @@ foreach ($p in $T.PSObject.Properties) { $xamlText = $xamlText.Replace('{{' + $p
 [xml]$xaml = $xamlText
 $script:window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $script:ui = @{}
-foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','Graph','L100','L90','T100','GpuLine','CpuLine','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
+foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanVal','Graph','L100','L90','T100','GpuLine','CpuLine','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
 
 $ui.CpuTrack.Data = Get-ArcGeometry 1; $ui.GpuTrack.Data = Get-ArcGeometry 1
 
@@ -384,6 +388,10 @@ $timer.Add_Tick({
         'lgc' { if ($sync.GpuClockCap) { $T.clockCap -f (N ([string][int]$sync.GpuClockCap)) } else { $T.clockReady } }
         'priority' { $T.viaPrio }
         default { if ($sync.HasNvidia) { $T.viaPrio } else { $T.noNv } }
+      }
+      $ui.FanVal.Text = if (-not $sync.FanOk -or -not $sync.FanMode) { $T.fanNA } else {
+        $fm = if ($sync.FanBoost) { $T.fanBoost } else { switch ($sync.FanMode) { 'max' { $T.fanMax } 'fixed' { $T.fanFixed } 'auto' { $T.fanAuto } default { $T.fanNormal } } }
+        (N ($T.fanRpm -f $sync.FanRpm1, $sync.FanRpm2)) + ' ' + [char]0x2014 + ' ' + $fm
       }
       $ui.PauseText.Text = if ($sync.PauseUntil -gt $now) { $T.resume } else { $T.pause15 }
       Update-Graph

@@ -1,6 +1,6 @@
 ﻿; Rosa Thermal Guard - Inno Setup script (build with build.ps1)
 #define AppName "Rosa Thermal Guard"
-#define AppVersion "1.0.1"
+#define AppVersion "1.1.0"
 #define AppPublisher "Rosa Thermal Guard contributors"
 
 [Setup]

@@ -25,6 +25,15 @@
       40
     ]
   },
+  "fanBoost": {
+    "enabled": true,
+    "cpuC": 85,
+    "gpuC": 83,
+    "restoreCpuC": 75,
+    "restoreGpuC": 73,
+    "restoreAfterSeconds": 20,
+    "maxDuty": 229
+  },
   "pauseCancelC": 97,
   "lowerPriorityTopN": 3,
   "notifications": true,

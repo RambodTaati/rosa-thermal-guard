@@ -5,13 +5,14 @@
 A small Windows tray app that keeps your **CPU and GPU below 100 °C**. When the chip gets hot it
 slows work down step by step; when it cools off it gives you full speed back.
 
-![Rosa Thermal Guard](../../releases/download/v1.0.1/screenshot-en.png)
+![Rosa Thermal Guard](../../releases/download/v1.1.0/screenshot-en.png)
 
 ## Features
 - Live CPU / GPU temperatures (LibreHardwareMonitor sensors), gauges and a 5-minute history graph
 - Tray icon that changes color: green = normal, orange = cooling down, red = hot, grey = paused; the tooltip shows °C
 - CPU throttling through the Windows power plan ("Maximum processor state", all core types, AC and DC)
 - NVIDIA GPU control: power limit (`nvidia-smi -pl`) when the driver allows it, otherwise a graphics clock cap (`nvidia-smi -lgc`), otherwise lower process priority
+- GIGABYTE laptops: switches the fans to maximum before any throttling (CPU 85 °C / GPU 83 °C) through GIGABYTE's own ACPI-WMI interface, and puts your fan mode back once it has cooled down (below 75 / 73 °C for 20 s), on exit and on uninstall
 - Lowers the priority of the heaviest apps when the CPU is critical; never touches system processes
 - Restores every original setting on exit, on uninstall and after a crash
 - Pause for 15 minutes from the tray (cancelled automatically if the CPU reaches 97 °C)
@@ -25,7 +26,7 @@ slows work down step by step; when it cools off it gives you full speed back.
 - NVIDIA driver with `nvidia-smi` for GPU control (optional)
 
 ## Install
-Download `RosaThermalGuard-Setup-1.0.1.exe` from the Releases page, check it against `SHA256SUMS.txt`, and run it.
+Download `RosaThermalGuard-Setup-1.1.0.exe` from the Releases page, check it against `SHA256SUMS.txt`, and run it.
 
 > The installer is **not code-signed**, so Windows SmartScreen may show "Windows protected your PC".
 > Click **More info → Run anyway** if you trust this release (verify the SHA-256 first).
