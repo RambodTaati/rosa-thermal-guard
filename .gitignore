@@ -1,0 +1,10 @@
+build/
+dist/
+*.log
+state.json
+settings.json
+*.flag
+ui*.png
+*.exe
+*.dll
+*.zip

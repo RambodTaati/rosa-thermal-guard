@@ -1,0 +1,70 @@
+{
+  "language": "auto",
+  "pollSeconds": 2,
+  "cpu": {
+    "throttleC": 90,
+    "criticalC": 95,
+    "restoreC": 80,
+    "restoreAfterSeconds": 20,
+    "maxStateSteps": [
+      100,
+      99,
+      85,
+      70,
+      55
+    ],
+    "minSecondsBetweenSteps": 6,
+    "maxTurboHoldSeconds": 600
+  },
+  "gpu": {
+    "throttleC": 88,
+    "restoreC": 78,
+    "clockStepsPercent": [
+      75,
+      55,
+      40
+    ]
+  },
+  "pauseCancelC": 97,
+  "lowerPriorityTopN": 3,
+  "notifications": true,
+  "allowSimulateFile": false,
+  "maxLogKB": 1024,
+  "protectedProcesses": [
+    "System",
+    "Idle",
+    "Registry",
+    "smss",
+    "csrss",
+    "wininit",
+    "winlogon",
+    "services",
+    "lsass",
+    "svchost",
+    "dwm",
+    "explorer",
+    "Memory Compression",
+    "MsMpEng",
+    "NisSrv",
+    "audiodg",
+    "fontdrvhost",
+    "spoolsv",
+    "SecurityHealthService",
+    "ctfmon",
+    "sihost",
+    "taskhostw",
+    "RuntimeBroker",
+    "StartMenuExperienceHost",
+    "ShellExperienceHost",
+    "SearchHost",
+    "TextInputHost",
+    "conhost",
+    "LogonUI",
+    "WUDFHost",
+    "dllhost",
+    "powershell",
+    "pwsh",
+    "wscript",
+    "nvidia-smi"
+  ]
+}
