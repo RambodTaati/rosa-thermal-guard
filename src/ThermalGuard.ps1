@@ -6,9 +6,11 @@
        lowers priority of the top CPU users at the critical threshold, restores when cool.
   GPU (NVIDIA): nvidia-smi -pl (power limit) when the driver allows it, otherwise
        nvidia-smi -lgc (graphics clock cap), otherwise process priority.
-  Fans (GIGABYTE laptops): before any throttling, switches the fans to maximum through GIGABYTE's own
+  Fans (GIGABYTE laptops): before any throttling, boosts the fans through GIGABYTE's own
        ACPI-WMI interface (root\WMI GB_WMIACPI_Set, the one Control Center uses) and restores the
        previous fan mode when cool, on exit, on uninstall and after a crash.
+       Fan health: normal boost at 88 % duty, 100 % only when critical (stepped back down when temps fall /
+       after a cap), minimum hold time and minimum interval between switches - all in config.json fanBoost.
   All thresholds come from config.json next to this script.
   Switches: -TestMode (simulated temps, real actions, then restore)
             -Restore  (put saved original settings back and exit)
@@ -280,6 +282,19 @@ $FAN_CPU_COOL = [double](CfgVal $cFan 'restoreCpuC' 75)
 $FAN_GPU_COOL = [double](CfgVal $cFan 'restoreGpuC' 73)
 $FAN_COOL_SECONDS = [int](CfgVal $cFan 'restoreAfterSeconds' 20)
 $FAN_DUTY = [int](CfgVal $cFan 'maxDuty' 229)   # 229 = 100 % duty on the GIGABYTE EC
+# fan health: normal boost below 100 %, full duty only when critical, no rapid on/off cycling
+$FAN_BOOST_PCT = [Math]::Max(50, [Math]::Min(100, [int](CfgVal $cFan 'boostDutyPercent' 88)))
+$FAN_BOOST_DUTY = [int][Math]::Round($FAN_DUTY * $FAN_BOOST_PCT / 100.0)
+$FAN_FULL_CPU = [double](CfgVal $cFan 'fullDutyCpuC' 95)
+$FAN_FULL_GPU = [double](CfgVal $cFan 'fullDutyGpuC' 90)
+$FAN_MIN_HOLD = [int](CfgVal $cFan 'minHoldSeconds' 60)
+$FAN_MIN_SWITCH = [int](CfgVal $cFan 'minSwitchIntervalSeconds' 30)
+$FAN_MAX_FULL = [int](CfgVal $cFan 'maxFullDutySeconds' 300)
+$FAN_STEPDOWN = [int](CfgVal $cFan 'stepDownWhenFallingSeconds' 30)
+# gauge calibration for the window: RPM of each fan at 100 % duty (measured on AORUS Master 16: ~6,380 / ~6,850)
+$FAN_MAXRPM1 = [int](CfgVal $cFan 'maxRpmCpuFan' 6400)
+$FAN_MAXRPM2 = [int](CfgVal $cFan 'maxRpmGpuFan' 6900)
+$script:FanLevel = 0; $script:FanSwitchAt = [datetime]::MinValue; $script:FanLevelSince = $null
 $FanStateFile = Join-Path $DataDir 'fanstate.json'   # previous fan mode while boosted (crash-safe)
 $script:FanOk = $false; $script:FanBoosted = $false; $script:FanInfo = $null
 function Fan-Get([string]$m) {
@@ -302,27 +317,31 @@ function Init-Fan {
     $null = Get-CimClass -Namespace root\WMI -ClassName GB_WMIACPI_Set -ErrorAction Stop
     $m = Get-FanMode; $r1 = Fan-Rpm 'getRpm1'; $r2 = Fan-Rpm 'getRpm2'
     $script:FanOk = $true
-    Write-Log ("fan control: GIGABYTE ACPI-WMI found (fans {0}/{1} RPM, fixed={2} step={3} auto={4}) - MAX at CPU {5} / GPU {6} C, restore below {7} / {8} C for {9}s" -f $r1, $r2, $m.Fixed, $m.Step, $m.Auto, $FAN_CPU, $FAN_GPU, $FAN_CPU_COOL, $FAN_GPU_COOL, $FAN_COOL_SECONDS)
+    Write-Log ("fan control: GIGABYTE ACPI-WMI found (fans {0}/{1} RPM, fixed={2} step={3} auto={4}) - boost {10}% at CPU {5} / GPU {6} C, 100% at CPU {11} / GPU {12} C (max {13}s), restore below {7} / {8} C for {9}s, hold {14}s, min {15}s between switches" -f $r1, $r2, $m.Fixed, $m.Step, $m.Auto, $FAN_CPU, $FAN_GPU, $FAN_CPU_COOL, $FAN_GPU_COOL, $FAN_COOL_SECONDS, $FAN_BOOST_PCT, $FAN_FULL_CPU, $FAN_FULL_GPU, $FAN_MAX_FULL, $FAN_MIN_HOLD, $FAN_MIN_SWITCH)
   } catch { Write-Log 'fan control: GIGABYTE ACPI-WMI not available on this PC - fan boost off' }
 }
 function Read-Fan {
   if (-not $FanOk) { return }
   try {
     $m = Get-FanMode
-    $mode = if ($m.Fixed -eq 1 -and $m.Speed -ge $FAN_DUTY) { 'max' } elseif ($m.Fixed -eq 1) { 'fixed' } elseif ($m.Auto -eq 1) { 'auto' } else { 'normal' }
-    $script:FanInfo = @{ Rpm1 = (Fan-Rpm 'getRpm1'); Rpm2 = (Fan-Rpm 'getRpm2'); Mode = $mode }
+    $mode = if ($m.Fixed -eq 1 -and $m.Speed -ge $FAN_DUTY - 2) { 'max' } elseif ($m.Fixed -eq 1 -and $FanBoosted -and [Math]::Abs($m.Speed - $FAN_BOOST_DUTY) -le 3) { 'boost' } elseif ($m.Fixed -eq 1) { 'fixed' } elseif ($m.Auto -eq 1) { 'auto' } else { 'normal' }
+    $script:FanInfo = @{ Rpm1 = (Fan-Rpm 'getRpm1'); Rpm2 = (Fan-Rpm 'getRpm2'); Mode = $mode; Fixed = $m.Fixed; Speed = $m.Speed }
   } catch { $script:FanInfo = $null }
 }
-function Fan-Boost([string]$why) {
+function Fan-Target([int]$level) { if ($level -ge 2) { $FAN_DUTY } else { $FAN_BOOST_DUTY } }
+function Fan-Boost([string]$why, [int]$level = 1) {
   try {
+    $duty = Fan-Target $level
     $prev = $null
     if (-not (Test-Path $FanStateFile)) { $prev = Get-FanMode; $prev | ConvertTo-Json | Set-Content $FanStateFile -Encoding UTF8 }
     Fan-Set 'SetCurrentFanStep' 0; Fan-Set 'SetAutoFanStatus' 0
-    Fan-Set 'SetFixedFanSpeed' $FAN_DUTY; Fan-Set 'SetGPUFanDuty' $FAN_DUTY
+    Fan-Set 'SetFixedFanSpeed' $duty; Fan-Set 'SetGPUFanDuty' $duty
     Fan-Set 'SetStepFanStatus' 1; Fan-Set 'SetFixedFanStatus' 1
     $script:FanBoosted = $true
-    if ($prev) { Write-Log ("fan mode -> MAX ({0}); saved previous mode fixed={1} step={2} auto={3} speed={4}" -f $why, $prev.Fixed, $prev.Step, $prev.Auto, $prev.Speed) }
-    else { Write-Log "fan mode -> MAX ($why)" }
+    if ($script:FanLevel -ne $level) { $script:FanLevel = $level; $script:FanSwitchAt = Get-Date; $script:FanLevelSince = Get-Date }
+    $lbl = if ($level -ge 2) { 'MAX 100%' } else { "BOOST $FAN_BOOST_PCT%" }
+    if ($prev) { Write-Log ("fan mode -> {5} duty={6} ({0}); saved previous mode fixed={1} step={2} auto={3} speed={4}" -f $why, $prev.Fixed, $prev.Step, $prev.Auto, $prev.Speed, $lbl, $duty) }
+    else { Write-Log "fan mode -> $lbl duty=$duty ($why)" }
   } catch { Write-Log "fan boost failed: $($_.Exception.Message)" }
 }
 function Restore-Fan([string]$why) {
@@ -338,6 +357,8 @@ function Restore-Fan([string]$why) {
     Write-Log ("fan mode restored ({0}): fixed={1} step={2} auto={3} speed={4}" -f $why, $p.Fixed, $p.Step, $p.Auto, $p.Speed)
   } catch { Write-Log "fan restore failed: $($_.Exception.Message)" }
   $script:FanBoosted = $false
+  if ($script:FanLevel -ne 0) { $script:FanSwitchAt = Get-Date }
+  $script:FanLevel = 0; $script:FanLevelSince = $null
 }
 
 function Restore-All([string]$why) {
@@ -420,7 +441,7 @@ if ($TestMode) {
 $coolSince = $null; $gpuCoolSince = $null; $lastStep = [datetime]::MinValue; $lastGpuStep = [datetime]::MinValue; $lastStepTemp = 0
 $restoreHold = $COOL_SECONDS; $lastFullRestore = $null; $wasPaused = $false
 $lastInfo = [datetime]::MinValue; $nullSince = $null; $lastRescan = Get-Date
-$fanCoolSince = $null; $lastFanFix = [datetime]::MinValue
+$fanCoolSince = $null; $lastFanFix = [datetime]::MinValue; $fanDownSince = $null; $fanPeakCpu = $null; $fanPeakGpu = $null; $fanCapLogged = $false
 Write-Log "RosaThermalGuard started (admin=$isAdmin, poll=${PollSeconds}s, CPU hot=$CPU_HOT crit=$CPU_CRIT cool=$CPU_COOL, GPU hot=$GPU_HOT cool=$GPU_COOL)"
 $exitCode = 0
 try {
@@ -514,19 +535,47 @@ try {
       if ($paused) { $fanCoolSince = $null }
       else {
         $fanHot = ($cpu -ne $null -and $cpu -ge $FAN_CPU) -or ($gpu -ne $null -and $gpu -ge $FAN_GPU)
-        if ($fanHot) {
+        $fanCrit = ($cpu -ne $null -and $cpu -ge $FAN_FULL_CPU) -or ($gpu -ne $null -and $gpu -ge $FAN_FULL_GPU)
+        $sinceSwitch = ($now - $FanSwitchAt).TotalSeconds
+        $held = if ($FanLevelSince) { ($now - $FanLevelSince).TotalSeconds } else { 0 }
+        $tempTxt = "CPU $cpu C, GPU $gpu C"
+        if ($fanCrit -and $FanLevel -lt 2) {
+          # critical: straight to 100 % (temperature safety outranks fan wear, no switch delay)
+          Fan-Boost "critical: $tempTxt" 2; $fanPeakCpu = $cpu; $fanPeakGpu = $gpu; $fanDownSince = $null; $fanCoolSince = $null; $fanCapLogged = $false; Read-Fan
+        } elseif ($FanLevel -eq 0) {
           $fanCoolSince = $null
-          if (-not $FanBoosted) { Fan-Boost ("CPU {0} C, GPU {1} C" -f $cpu, $gpu); Read-Fan }
-          elseif ($FanInfo -and $FanInfo.Mode -ne 'max' -and ($now - $lastFanFix).TotalSeconds -ge 30) {
-            Write-Log "fan mode was changed outside Thermal Guard ($($FanInfo.Mode)) while still hot - MAX again"
-            Fan-Boost 're-apply'; $lastFanFix = $now; Read-Fan
+          if ($fanHot) {
+            if ($sinceSwitch -ge $FAN_MIN_SWITCH) { Fan-Boost $tempTxt 1; Read-Fan }
           }
-        } elseif ($FanBoosted) {
-          $fanCool = ($cpu -eq $null -or $cpu -lt $FAN_CPU_COOL) -and ($gpu -eq $null -or $gpu -lt $FAN_GPU_COOL) -and $CpuLevel -eq 0 -and -not $GpuThrottled
-          if (-not $fanCool) { $fanCoolSince = $null }
-          elseif (-not $fanCoolSince) { $fanCoolSince = $now }
-          elseif (($now - $fanCoolSince).TotalSeconds -ge $FAN_COOL_SECONDS) {
-            Write-Log "fans: cool for ${FAN_COOL_SECONDS}s (CPU $cpu C, GPU $gpu C)"; Restore-Fan 'cooled down'; $fanCoolSince = $null; Read-Fan
+        } else {
+          # keep the boost asserted if Control Center (or anything else) changed it
+          if ($FanInfo -and ($FanInfo.Fixed -ne 1 -or [Math]::Abs($FanInfo.Speed - (Fan-Target $FanLevel)) -gt 3) -and ($fanHot -or $FanLevel -eq 2) -and ($now - $lastFanFix).TotalSeconds -ge 30) {
+            Write-Log "fan mode was changed outside Thermal Guard ($($FanInfo.Mode), speed $($FanInfo.Speed)) while still hot - boost again"
+            Fan-Boost 're-apply' $FanLevel; $lastFanFix = $now; Read-Fan
+          }
+          if ($FanLevel -eq 2) {
+            $fanCoolSince = $null
+            if ($cpu -ne $null -and ($fanPeakCpu -eq $null -or $cpu -gt $fanPeakCpu)) { $fanPeakCpu = $cpu }
+            if ($gpu -ne $null -and ($fanPeakGpu -eq $null -or $gpu -gt $fanPeakGpu)) { $fanPeakGpu = $gpu }
+            $belowCrit = ($cpu -eq $null -or $cpu -lt $FAN_FULL_CPU - 3) -and ($gpu -eq $null -or $gpu -lt $FAN_FULL_GPU - 3)
+            $falling = (($cpu -eq $null -or $fanPeakCpu -eq $null -or $cpu -le $fanPeakCpu - 3) -and ($gpu -eq $null -or $fanPeakGpu -eq $null -or $gpu -le $fanPeakGpu - 3)) -or (($cpu -eq $null -or $cpu -lt $FAN_FULL_CPU - 5) -and ($gpu -eq $null -or $gpu -lt $FAN_FULL_GPU - 5))
+            if ($belowCrit -and $falling) { if (-not $fanDownSince) { $fanDownSince = $now } } else { $fanDownSince = $null }
+            $capHit = $FAN_MAX_FULL -gt 0 -and $held -ge $FAN_MAX_FULL
+            if ($held -ge $FAN_MIN_HOLD -and $sinceSwitch -ge $FAN_MIN_SWITCH -and $belowCrit -and (($fanDownSince -and ($now - $fanDownSince).TotalSeconds -ge $FAN_STEPDOWN) -or $capHit)) {
+              $why = if ($capHit -and -not ($fanDownSince -and ($now - $fanDownSince).TotalSeconds -ge $FAN_STEPDOWN)) { "100% cap ${FAN_MAX_FULL}s reached" } else { 'temperatures falling' }
+              Fan-Boost "step down, ${why}: $tempTxt" 1; $fanDownSince = $null; Read-Fan
+            } elseif ($capHit -and -not $belowCrit -and -not $fanCapLogged) {
+              Write-Log "fans: 100% for ${FAN_MAX_FULL}s but still critical ($tempTxt) - staying at 100% for safety"; $fanCapLogged = $true
+            }
+          } elseif ($fanHot) {
+            $fanCoolSince = $null
+          } else {
+            $fanCool = ($cpu -eq $null -or $cpu -lt $FAN_CPU_COOL) -and ($gpu -eq $null -or $gpu -lt $FAN_GPU_COOL) -and $CpuLevel -eq 0 -and -not $GpuThrottled
+            if (-not $fanCool) { $fanCoolSince = $null }
+            elseif (-not $fanCoolSince) { $fanCoolSince = $now }
+            elseif (($now - $fanCoolSince).TotalSeconds -ge $FAN_COOL_SECONDS -and $held -ge $FAN_MIN_HOLD -and $sinceSwitch -ge $FAN_MIN_SWITCH) {
+              Write-Log "fans: cool for $([int]($now - $fanCoolSince).TotalSeconds)s, boosted for $([int]$held)s ($tempTxt)"; Restore-Fan 'cooled down'; $fanCoolSince = $null; Read-Fan
+            }
           }
         }
       }
@@ -546,7 +595,7 @@ try {
       $Sync.Cpu = $cpu; $Sync.Gpu = $gpu; $Sync.Level = $CpuLevel; $Sync.MaxPct = $CPU_STEPS[$CpuLevel]
       $Sync.GpuThrottled = $GpuThrottled; $Sync.Paused = $paused; $Sync.HasNvidia = $HasNvidia; $Sync.Sim = $simActive
       $Sync.GpuMode = $(if ($Nv) { $Nv.Mode } else { $null }); $Sync.GpuLimitW = $(if ($Nv) { $Nv.Cur } else { $null }); $Sync.GpuDefaultW = $(if ($Nv) { $Nv.Default } else { $null }); $Sync.GpuClockCap = $(if ($Nv) { $Nv.LgcMhz } else { $null })
-      $Sync.FanOk = $FanOk; $Sync.FanBoost = $FanBoosted
+      $Sync.FanOk = $FanOk; $Sync.FanBoost = $FanBoosted; $Sync.FanLevel = $FanLevel; $Sync.FanBoostPct = $FAN_BOOST_PCT; $Sync.FanMax1 = $FAN_MAXRPM1; $Sync.FanMax2 = $FAN_MAXRPM2
       if ($FanInfo) { $Sync.FanRpm1 = $FanInfo.Rpm1; $Sync.FanRpm2 = $FanInfo.Rpm2; $Sync.FanMode = $FanInfo.Mode } else { $Sync.FanMode = $null }
       $Sync.Reniced = $Reniced.Count; $Sync.Updated = Get-Date
       if ($Sync.Stop) { Write-Log 'exit requested from tray'; break }

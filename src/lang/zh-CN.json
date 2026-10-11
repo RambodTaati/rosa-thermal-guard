@@ -42,6 +42,7 @@
   "fanRpm": "{0} / {1} RPM",
   "fanAuto": "自动",
   "fanMax": "最大",
+  "fanBoostSoft": "散热增强 {0}%",
   "fanBoost": "最大（散热增强）",
   "fanFixed": "固定",
   "fanNormal": "标准",

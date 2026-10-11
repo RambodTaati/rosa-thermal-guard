@@ -42,6 +42,7 @@
   "fanRpm": "{0} / {1} دورة",
   "fanAuto": "تلقائي",
   "fanMax": "أقصى",
+  "fanBoostSoft": "تعزيز التبريد {0}%",
   "fanBoost": "أقصى (تبريد معزز)",
   "fanFixed": "ثابت",
   "fanNormal": "عادي",

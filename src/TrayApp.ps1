@@ -190,10 +190,46 @@ $xamlText = @'
             <TextBlock Text="{{gpuCtl}}" Foreground="#FF8A91A5" FontSize="13"/>
             <TextBlock x:Name="GpuLimit" Text="—" Foreground="#FFF1F3F8" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
           </Grid>
-          <Grid Margin="0,6,0,2">
-            <TextBlock Text="{{fans}}" Foreground="#FF8A91A5" FontSize="13"/>
-            <TextBlock x:Name="FanVal" Text="-" Foreground="#FFF1F3F8" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+          <Border Height="1" Background="#FF262A36" Margin="0,10,0,8"/>
+          <Grid>
+            <TextBlock Text="{{fans}}" Foreground="#FF8A91A5" FontSize="13" VerticalAlignment="Center"/>
+            <Border x:Name="FanBadge" HorizontalAlignment="Right" VerticalAlignment="Center" CornerRadius="9" Padding="10,2,10,3" Background="#2660A5FA">
+              <TextBlock x:Name="FanBadgeText" Text="-" Foreground="#FF60A5FA" FontSize="11.5" FontWeight="SemiBold"/>
+            </Border>
           </Grid>
+          <StackPanel Grid.IsSharedSizeScope="True" Margin="0,0,0,2">
+            <Grid x:Name="FanRow1" Margin="0,8,0,0" Background="Transparent">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="Auto" SharedSizeGroup="FanLbl"/><ColumnDefinition Width="*"/><ColumnDefinition Width="42"/></Grid.ColumnDefinitions>
+              <Canvas Grid.Column="0" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <Ellipse Width="18" Height="18" Fill="#FF20242F"/>
+                <Path x:Name="Fan1Icon" Fill="#FF34D399" Data="M9.00,7.20 C8.20,3.50 10.50,0.60 13.20,1.80 C14.60,3.20 12.40,6.40 10.40,8.20 Z M10.80,9.00 C14.50,8.20 17.40,10.50 16.20,13.20 C14.80,14.60 11.60,12.40 9.80,10.40 Z M9.00,10.80 C9.80,14.50 7.50,17.40 4.80,16.20 C3.40,14.80 5.60,11.60 7.60,9.80 Z M7.20,9.00 C3.50,9.80 0.60,7.50 1.80,4.80 C3.20,3.40 6.40,5.60 8.20,7.60 Z">
+                  <Path.RenderTransform><RotateTransform CenterX="9" CenterY="9"/></Path.RenderTransform>
+                </Path>
+                <Ellipse Canvas.Left="6.5" Canvas.Top="6.5" Width="5" Height="5" Fill="#FF1B1E27" Stroke="#FF8A91A5" StrokeThickness="0.8"/>
+              </Canvas>
+              <TextBlock Grid.Column="1" Text="{{cpu}}" Foreground="#FFC9CEDB" FontSize="12.5" VerticalAlignment="Center" Margin="4,0,12,0"/>
+              <Grid Grid.Column="2" x:Name="Fan1Track" Height="8" VerticalAlignment="Center">
+                <Border CornerRadius="4" Background="#FF262A36"/>
+                <Border x:Name="Fan1Fill" CornerRadius="4" HorizontalAlignment="Left" Width="0" Background="#FF34D399"/>
+              </Grid>
+              <TextBlock Grid.Column="3" x:Name="Fan1Pct" Text="" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>            <Grid x:Name="FanRow2" Margin="0,8,0,0" Background="Transparent">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="Auto" SharedSizeGroup="FanLbl"/><ColumnDefinition Width="*"/><ColumnDefinition Width="42"/></Grid.ColumnDefinitions>
+              <Canvas Grid.Column="0" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <Ellipse Width="18" Height="18" Fill="#FF20242F"/>
+                <Path x:Name="Fan2Icon" Fill="#FF34D399" Data="M9.00,7.20 C8.20,3.50 10.50,0.60 13.20,1.80 C14.60,3.20 12.40,6.40 10.40,8.20 Z M10.80,9.00 C14.50,8.20 17.40,10.50 16.20,13.20 C14.80,14.60 11.60,12.40 9.80,10.40 Z M9.00,10.80 C9.80,14.50 7.50,17.40 4.80,16.20 C3.40,14.80 5.60,11.60 7.60,9.80 Z M7.20,9.00 C3.50,9.80 0.60,7.50 1.80,4.80 C3.20,3.40 6.40,5.60 8.20,7.60 Z">
+                  <Path.RenderTransform><RotateTransform CenterX="9" CenterY="9"/></Path.RenderTransform>
+                </Path>
+                <Ellipse Canvas.Left="6.5" Canvas.Top="6.5" Width="5" Height="5" Fill="#FF1B1E27" Stroke="#FF8A91A5" StrokeThickness="0.8"/>
+              </Canvas>
+              <TextBlock Grid.Column="1" Text="{{gpu}}" Foreground="#FFC9CEDB" FontSize="12.5" VerticalAlignment="Center" Margin="4,0,12,0"/>
+              <Grid Grid.Column="2" x:Name="Fan2Track" Height="8" VerticalAlignment="Center">
+                <Border CornerRadius="4" Background="#FF262A36"/>
+                <Border x:Name="Fan2Fill" CornerRadius="4" HorizontalAlignment="Left" Width="0" Background="#FF34D399"/>
+              </Grid>
+              <TextBlock Grid.Column="3" x:Name="Fan2Pct" Text="" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>          </StackPanel>
+
         </StackPanel>
       </Border>
       <Grid Margin="0,14,0,6">
@@ -232,9 +268,10 @@ foreach ($p in $T.PSObject.Properties) { $xamlText = $xamlText.Replace('{{' + $p
 [xml]$xaml = $xamlText
 $script:window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $script:ui = @{}
-foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanVal','Graph','L100','L90','T100','GpuLine','CpuLine','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
+foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
 
 $ui.CpuTrack.Data = Get-ArcGeometry 1; $ui.GpuTrack.Data = Get-ArcGeometry 1
+$window.Add_IsVisibleChanged({ if ($window.IsVisible) { $script:fanLast = $fanSw.Elapsed.TotalSeconds; $fanAnim.Start() } else { $fanAnim.Stop() } })
 
 $window.Add_Closing({ if (-not $script:allowClose) { $_.Cancel = $true; $window.Hide() } })
 $window.Add_MouseLeftButtonDown({ try { $window.DragMove() } catch {} })
@@ -263,6 +300,56 @@ foreach ($code in $LangNames.Keys) {
   [void]$ui.LangBar.Children.Add($b)
 }
 }
+# ---------- fan gauges: spinning icon (speed ~ RPM) + bar (percent of max RPM), animated only while the window is visible ----------
+# each gauge is scaled to its own fan's RPM at 100 % duty (fanBoost.maxRpmCpuFan / maxRpmGpuFan, sent by the engine),
+# raised automatically if a fan is ever seen spinning faster (running max, this session)
+$script:fanMaxRpm = @{ 1 = 6400.0; 2 = 6900.0 }; $script:fanMaxCfg = @{ 1 = 0.0; 2 = 0.0 }
+$script:fanState = @{ T1 = 0.0; T2 = 0.0; P1 = 0.0; P2 = 0.0; A1 = 0.0; A2 = 0.0 }
+$fanSw = [Diagnostics.Stopwatch]::StartNew(); $script:fanLast = 0.0
+function Fan-Hex([double]$p) { if ($p -lt 0.55) { '#34D399' } elseif ($p -lt 0.80) { '#FBBF24' } else { '#F43F5E' } }
+function Fan-Hex2([double]$p) { if ($p -lt 0.55) { '#A7F3D0' } elseif ($p -lt 0.80) { '#FDE68A' } else { '#FDA4AF' } }
+function Step-FanAnim {
+  $now = $fanSw.Elapsed.TotalSeconds; $dt = [Math]::Min(0.1, [Math]::Max(0.0, $now - $script:fanLast)); $script:fanLast = $now
+  $k = 1.0 - [Math]::Exp(-6.0 * $dt)
+  $fs = $script:fanState
+  foreach ($i in 1, 2) {
+    $fs["P$i"] = $fs["P$i"] + ($fs["T$i"] - $fs["P$i"]) * $k
+    $pp = $fs["P$i"]
+    $fs["A$i"] = ($fs["A$i"] + $dt * 900.0 * $pp) % 360.0      # 2.5 turns/s at full speed, still when the fan is off
+    $ui["Fan${i}Icon"].RenderTransform.Angle = $fs["A$i"]
+    $w = $ui["Fan${i}Track"].ActualWidth
+    if ($w -gt 0) { $ui["Fan${i}Fill"].Width = $(if ($pp -lt 0.005) { 0 } else { [Math]::Min($w, [Math]::Max(8.0, $w * $pp)) }) }
+  }
+}
+$fanAnim = New-Object Windows.Threading.DispatcherTimer
+$fanAnim.Interval = [TimeSpan]::FromMilliseconds(40)   # 25 fps
+$fanAnim.Add_Tick({ try { Step-FanAnim } catch {} })
+function Update-FanUi {
+  $fs = $script:fanState
+  $ok = [bool]$sync.FanOk -and [bool]$sync.FanMode
+  if (-not $ok) {
+    $fs.T1 = 0.0; $fs.T2 = 0.0
+    $ui.FanBadge.Background = Brush '#264B5263'; $ui.FanBadgeText.Foreground = Brush '#FF8A91A5'; $ui.FanBadgeText.Text = $T.fanNA
+    foreach ($i in 1, 2) { $ui["Fan${i}Pct"].Text = ''; $ui["FanRow$i"].ToolTip = $null; $ui["Fan${i}Icon"].Fill = Brush '#FF4B5263' }
+    return
+  }
+  foreach ($i in 1, 2) {
+    $rpm = [double]$sync["FanRpm$i"]
+    $cfgMax = [double]$sync["FanMax$i"]; if ($cfgMax -ge 1000 -and $cfgMax -ne $script:fanMaxCfg[$i]) { $script:fanMaxCfg[$i] = $cfgMax; $script:fanMaxRpm[$i] = $cfgMax }
+    if ($rpm -gt $script:fanMaxRpm[$i] -and $rpm -lt 12000) { $script:fanMaxRpm[$i] = $rpm }
+    $pp = [Math]::Max(0.0, [Math]::Min(1.0, $rpm / $script:fanMaxRpm[$i])); $fs["T$i"] = $pp
+    $hex = Fan-Hex $pp
+    $ui["Fan${i}Icon"].Fill = Brush $hex
+    $ui["Fan${i}Fill"].Background = New-Object Windows.Media.LinearGradientBrush ([Windows.Media.ColorConverter]::ConvertFromString((Fan-Hex2 $pp))), ([Windows.Media.ColorConverter]::ConvertFromString($hex)), 0.0
+    $ui["Fan${i}Pct"].Text = N ($T.pct -f [int][Math]::Round($pp * 100))
+    $ui["FanRow$i"].ToolTip = N ($T.fanRpm -f [int]$sync.FanRpm1, [int]$sync.FanRpm2)
+  }
+  $b = if ($sync.FanBoost -and [int]$sync.FanLevel -ge 2) { @('#33F43F5E', '#FFFB7185', $T.fanBoost) }
+       elseif ($sync.FanBoost) { @('#33FB923C', '#FFFB923C', (N ($(if ($T.fanBoostSoft) { $T.fanBoostSoft } else { '{0}%' }) -f [int]$sync.FanBoostPct))) }
+       else { switch ($sync.FanMode) { 'max' { @('#33FB923C', '#FFFB923C', $T.fanMax) } 'fixed' { @('#33A78BFA', '#FFA78BFA', $T.fanFixed) } 'auto' { @('#2660A5FA', '#FF60A5FA', $T.fanAuto) } default { @('#2694A3B8', '#FFB4BCCB', $T.fanNormal) } } }
+  $ui.FanBadge.Background = Brush $b[0]; $ui.FanBadgeText.Foreground = Brush $b[1]; $ui.FanBadgeText.Text = $b[2]
+}
+
 $script:allowClose = $false
 Build-Window
 
@@ -389,10 +476,7 @@ $timer.Add_Tick({
         'priority' { $T.viaPrio }
         default { if ($sync.HasNvidia) { $T.viaPrio } else { $T.noNv } }
       }
-      $ui.FanVal.Text = if (-not $sync.FanOk -or -not $sync.FanMode) { $T.fanNA } else {
-        $fm = if ($sync.FanBoost) { $T.fanBoost } else { switch ($sync.FanMode) { 'max' { $T.fanMax } 'fixed' { $T.fanFixed } 'auto' { $T.fanAuto } default { $T.fanNormal } } }
-        (N ($T.fanRpm -f $sync.FanRpm1, $sync.FanRpm2)) + ' ' + [char]0x2014 + ' ' + $fm
-      }
+      Update-FanUi
       $ui.PauseText.Text = if ($sync.PauseUntil -gt $now) { $T.resume } else { $T.pause15 }
       Update-Graph
     }

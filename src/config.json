@@ -32,7 +32,16 @@
     "restoreCpuC": 75,
     "restoreGpuC": 73,
     "restoreAfterSeconds": 20,
-    "maxDuty": 229
+    "maxDuty": 229,
+    "boostDutyPercent": 88,
+    "fullDutyCpuC": 95,
+    "fullDutyGpuC": 90,
+    "minHoldSeconds": 60,
+    "minSwitchIntervalSeconds": 30,
+    "maxFullDutySeconds": 300,
+    "stepDownWhenFallingSeconds": 30,
+    "maxRpmCpuFan": 6400,
+    "maxRpmGpuFan": 6900
   },
   "pauseCancelC": 97,
   "lowerPriorityTopN": 3,

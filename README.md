@@ -12,7 +12,7 @@ slows work down step by step; when it cools off it gives you full speed back.
 - Tray icon that changes color: green = normal, orange = cooling down, red = hot, grey = paused; the tooltip shows °C
 - CPU throttling through the Windows power plan ("Maximum processor state", all core types, AC and DC)
 - NVIDIA GPU control: power limit (`nvidia-smi -pl`) when the driver allows it, otherwise a graphics clock cap (`nvidia-smi -lgc`), otherwise lower process priority
-- GIGABYTE laptops: switches the fans to maximum before any throttling (CPU 85 °C / GPU 83 °C) through GIGABYTE's own ACPI-WMI interface, and puts your fan mode back once it has cooled down (below 75 / 73 °C for 20 s), on exit and on uninstall
+- GIGABYTE laptops: switches the fans to maximum before any throttling (CPU 85 °C / GPU 83 °C) through GIGABYTE's own ACPI-WMI interface, and puts your fan mode back once it has cooled down (below 75 / 73 °C for 20 s), on exit and on uninstall; for fan health, the normal boost runs at 88% duty and 100% only when critical (CPU 95 °C / GPU 90 °C, stepping back to 88% as temperatures fall or after 5 min), with a 60 s minimum hold and at least 30 s between fan-mode switches (all configurable in `fanBoost`)
 - Lowers the priority of the heaviest apps when the CPU is critical; never touches system processes
 - Restores every original setting on exit, on uninstall and after a crash
 - Pause for 15 minutes from the tray (cancelled automatically if the CPU reaches 97 °C)
