@@ -14,7 +14,8 @@
       55
     ],
     "minSecondsBetweenSteps": 6,
-    "maxTurboHoldSeconds": 600
+    "maxTurboHoldSeconds": 600,
+    "triggerSamples": 2
   },
   "gpu": {
     "throttleC": 88,
@@ -23,27 +24,33 @@
       75,
       55,
       40
-    ]
+    ],
+    "triggerSamples": 2
   },
   "fanBoost": {
     "enabled": true,
-    "cpuC": 85,
-    "gpuC": 83,
-    "restoreCpuC": 75,
-    "restoreGpuC": 73,
-    "restoreAfterSeconds": 20,
-    "maxDuty": 229,
-    "boostDutyPercent": 88,
+    "curveCpu": [[75, 50], [80, 58], [85, 68], [90, 80], [94, 90]],
+    "curveGpu": [[72, 50], [76, 57], [80, 65], [84, 74], [88, 84]],
     "fullDutyCpuC": 95,
     "fullDutyGpuC": 90,
+    "hysteresisC": 4,
+    "engageMarginPercent": 5,
     "minHoldSeconds": 60,
-    "minSwitchIntervalSeconds": 30,
-    "maxFullDutySeconds": 300,
-    "stepDownWhenFallingSeconds": 30,
+    "minSwitchIntervalSeconds": 60,
+    "rampUpStepPercent": 2,
+    "rampDownStepPercent": 2,
+    "rampIntervalSeconds": 2,
+    "releaseCpuC": 70,
+    "releaseGpuC": 67,
+    "releaseAfterSeconds": 30,
+    "handBackMarginPercent": 4,
+    "handBackFallbackPercent": 25,
+    "smoothingSeconds": 12,
+    "criticalSamples": 3,
+    "maxDuty": 229,
     "maxRpmCpuFan": 6400,
     "maxRpmGpuFan": 6900
-  },
-  "pauseCancelC": 97,
+  },  "pauseCancelC": 97,
   "lowerPriorityTopN": 3,
   "notifications": true,
   "allowSimulateFile": false,

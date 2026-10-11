@@ -103,6 +103,33 @@ function Update-Graph {
     if ($history[$i].G -ne $null) { $gp.Add((New-Object Windows.Point($x, (& $y $history[$i].G)))) }
   }
   $ui.CpuLine.Points = $cp; $ui.GpuLine.Points = $gp
+  # fan speed (% of each fan's own max) on a 0-100 % scale + fan-mode shading and a thin band at the bottom
+  $fy = { param($v) ($h - 5) - ([Math]::Max(0.0, [Math]::Min(100.0, [double]$v)) / 100.0) * ($h - 10) }
+  [Windows.Controls.Canvas]::SetLeft($ui.TFan, $w - 24); [Windows.Controls.Canvas]::SetTop($ui.TFan, (& $fy 100) - 4)
+  $f1 = New-Object Windows.Media.PointCollection; $f2 = New-Object Windows.Media.PointCollection
+  $sb = New-Object Windows.Media.GeometryGroup; $sm = New-Object Windows.Media.GeometryGroup
+  $bb = New-Object Windows.Media.GeometryGroup; $bm = New-Object Windows.Media.GeometryGroup
+  $runM = 0; $runStart = 0
+  for ($i = 0; $i -le $history.Count; $i++) {
+    $md = if ($i -lt $history.Count) { [int]$history[$i].M } else { -1 }
+    if ($i -lt $history.Count) {
+      $x = ($off + $i) * $step
+      if ($history[$i].F1 -ne $null) { $f1.Add((New-Object Windows.Point($x, (& $fy $history[$i].F1)))) }
+      if ($history[$i].F2 -ne $null) { $f2.Add((New-Object Windows.Point($x, (& $fy $history[$i].F2)))) }
+    }
+    if ($md -ne $runM) {
+      if ($runM -gt 0 -and $i -gt $runStart) {
+        $x0 = [Math]::Max(0.0, ($off + $runStart) * $step - $step / 2); $x1 = [Math]::Min($w, ($off + $i - 1) * $step + $step / 2)
+        $shade = New-Object Windows.Media.RectangleGeometry (New-Object Windows.Rect($x0, 0, [Math]::Max(1.0, $x1 - $x0), $h))
+        $band = New-Object Windows.Media.RectangleGeometry (New-Object Windows.Rect($x0, ($h - 3), [Math]::Max(1.0, $x1 - $x0), 3))
+        if ($runM -ge 2) { $sm.Children.Add($shade); $bm.Children.Add($band) } else { $sb.Children.Add($shade); $bb.Children.Add($band) }
+      }
+      $runM = $md; $runStart = $i
+    }
+  }
+  $ui.Fan1Line.Points = $f1; $ui.Fan2Line.Points = $f2
+  $ui.ShadeBoost.Data = $sb; $ui.ShadeMax.Data = $sm; $ui.BandBoost.Data = $bb; $ui.BandMax.Data = $bm
+  $ui.TFan.Visibility = $(if ($f1.Count -gt 0 -or $f2.Count -gt 0) { 'Visible' } else { 'Collapsed' })
 }
 
 # Shows the window, restores it if Windows left it minimized (iconic) and brings it to the front.
@@ -246,10 +273,27 @@ $xamlText = @'
           <Line x:Name="L100" Stroke="#66F43F5E" StrokeThickness="1" StrokeDashArray="4 3"/>
           <Line x:Name="L90" Stroke="#44FBBF24" StrokeThickness="1" StrokeDashArray="2 4"/>
           <TextBlock x:Name="T100" Text="100°" Foreground="#99F43F5E" FontSize="9"/>
+          <Path x:Name="ShadeBoost" Fill="#12FBBF24"/>
+          <Path x:Name="ShadeMax" Fill="#1CF43F5E"/>
+          <Path x:Name="BandBoost" Fill="#CCFBBF24"/>
+          <Path x:Name="BandMax" Fill="#DDF43F5E"/>
+          <TextBlock x:Name="TFan" Text="100%" Foreground="#992DD4BF" FontSize="9"/>
+          <Polyline x:Name="Fan2Line" Stroke="#C4B5FD" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
+          <Polyline x:Name="Fan1Line" Stroke="#2DD4BF" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
           <Polyline x:Name="GpuLine" Stroke="#60A5FA" StrokeThickness="1.8" StrokeLineJoin="Round"/>
           <Polyline x:Name="CpuLine" Stroke="#FB923C" StrokeThickness="1.8" StrokeLineJoin="Round"/>
         </Canvas>
       </Border>
+      <WrapPanel x:Name="FanLegend" HorizontalAlignment="Center" Margin="0,6,0,0">
+        <Line X1="0" Y1="0" X2="12" Y2="0" Stroke="#2DD4BF" StrokeThickness="1.6" StrokeDashArray="3 2" VerticalAlignment="Center"/>
+        <TextBlock Text="{{lgCpuFan}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
+        <Line X1="0" Y1="0" X2="12" Y2="0" Stroke="#C4B5FD" StrokeThickness="1.6" StrokeDashArray="3 2" VerticalAlignment="Center"/>
+        <TextBlock Text="{{lgGpuFan}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
+        <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#CCFBBF24" VerticalAlignment="Center"/>
+        <TextBlock Text="{{lgBoost}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
+        <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DDF43F5E" VerticalAlignment="Center"/>
+        <TextBlock Text="{{lgMax}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,0,0"/>
+      </WrapPanel>
       <Grid Margin="0,14,0,0">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
         <Border x:Name="PauseBtn" Grid.Column="0" CornerRadius="12" Background="#FF232734" Padding="0,8" Cursor="Hand">
@@ -268,7 +312,7 @@ foreach ($p in $T.PSObject.Properties) { $xamlText = $xamlText.Replace('{{' + $p
 [xml]$xaml = $xamlText
 $script:window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $script:ui = @{}
-foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
+foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','ShadeBoost','ShadeMax','BandBoost','BandMax','TFan','Fan1Line','Fan2Line','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
 
 $ui.CpuTrack.Data = Get-ArcGeometry 1; $ui.GpuTrack.Data = Get-ArcGeometry 1
 $window.Add_IsVisibleChanged({ if ($window.IsVisible) { $script:fanLast = $fanSw.Elapsed.TotalSeconds; $fanAnim.Start() } else { $fanAnim.Stop() } })
@@ -451,7 +495,13 @@ $timer.Add_Tick({
     if ($sync.Notify) { $nk = @($sync.Notify); $sync.Notify = $null; $msg = ([string]$T.($nk[0])) -f $nk[1]; if ($msg) { $notify.ShowBalloonTip(4000, $T.title, $msg, 'Warning') } }
 
     if (($now - $script:lastHist).TotalSeconds -ge 2 -and $sync.Updated) {
-      $history.Add([pscustomobject]@{ C = $cpu; G = $gpu }); if ($history.Count -gt 150) { $history.RemoveAt(0) }
+      $hf1 = $null; $hf2 = $null; $hm = 0
+      if ($sync.FanOk -and $sync.FanMode) {
+        if ($sync.FanRpm1 -ne $null) { $hf1 = 100.0 * [Math]::Min(1.0, [double]$sync.FanRpm1 / [Math]::Max(1000.0, $script:fanMaxRpm[1])) }
+        if ($sync.FanRpm2 -ne $null) { $hf2 = 100.0 * [Math]::Min(1.0, [double]$sync.FanRpm2 / [Math]::Max(1000.0, $script:fanMaxRpm[2])) }
+        if ($sync.FanBoost) { $hm = $(if ([int]$sync.FanLevel -ge 2) { 2 } else { 1 }) }
+      }
+      $history.Add([pscustomobject]@{ C = $cpu; G = $gpu; F1 = $hf1; F2 = $hf2; M = $hm }); if ($history.Count -gt 150) { $history.RemoveAt(0) }
       $script:lastHist = $now
     }
 
