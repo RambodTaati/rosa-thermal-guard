@@ -86,15 +86,20 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{commonappdata}\RosaThermalGuard"
 
-; ---- Rosa Guard suite (contract 1.1): HKLM registration as app "thermal" + the shared TabHost/SDK component, ref-counted ----
+; ---- Rosa Guard suite (contract 1.2): HKLM registration as app "thermal" + the shared SDK component, ref-counted ----
+; Installing also moves Thermal's 1.1.x "TabHost" ref to SDK\1.2.0; TabHost is deleted once no app references it.
+; No RG_StartupTaskName: Thermal keeps its own \RosaThermalGuard logon task (Install-Task.ps1), compliant per PLUGIN-GUIDE.
 #define RG_AppId          "thermal"
 #define RG_AppVersion     AppVersion
 #define RG_DisplayName    AppName
 #define RG_Capabilities   "gaming.detect"
 #define RG_ScriptPath     "TrayApp.ps1"
 #define RG_RunsElevated   "1"
-#define RG_TabHostVersion "1.1.2"
-#define RG_TabHostSource  "..\..\RosaGuard-SDK"
+#define RG_SdkVersion     "1.2.0"
+#ifndef RG_SdkSource
+  ; build.ps1 passes /DRG_SdkSource=<official release folder> (RosaGuard-SDK-LATEST.txt), after verifying bin\SHA256SUMS
+  #define RG_SdkSource    "..\..\RosaGuard-SDK"
+#endif
 #define RG_NoAutoHooks
 #include "RosaGuardShared.iss"
 

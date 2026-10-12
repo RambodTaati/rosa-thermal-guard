@@ -63,7 +63,7 @@ gives you full speed back and hands the fans back to the firmware.
   re-read. Only vendor-supported calls are used (Windows power plan, `nvidia-smi`, GIGABYTE WMI).
 - **Pause** for 15 minutes from the tray (cancelled automatically if the CPU reaches 97 °C).
 - **4 languages**: English, فارسی, العربية, 简体中文 (auto-detected, switchable in the window; RTL for fa/ar).
-- **Starts with Windows** (scheduled task, elevated, no UAC prompt at each logon), hidden in the tray: no window, no
+- **Starts with Windows** (scheduled task, elevated, no UAC prompt at each logon, 15 s after sign-in), hidden in the tray: no window, no
   focus change. Turn it off or on with **Start with Windows** in the window (on by default; the choice is kept on updates).
 - **Auto-update** (from v1.2.0): about once a day (and ~5 min after start) the guard asks GitHub for the latest
   release. A newer installer is downloaded over HTTPS from that release only, its SHA-256 must match the release's
@@ -101,8 +101,8 @@ gives you full speed back and hands the fans back to the firmware.
 - For fan control: a GIGABYTE laptop with its WMI interface (the GIGABYTE Control Center can stay installed)
 
 ## Install
-Download `RosaThermalGuard-Setup-1.3.0.exe` from the Releases page, check it against `SHA256SUMS.txt`
-(`Get-FileHash .\RosaThermalGuard-Setup-1.3.0.exe`), and run it.
+Download `RosaThermalGuard-Setup-1.3.1.exe` from the Releases page, check it against `SHA256SUMS.txt`
+(`Get-FileHash .\RosaThermalGuard-Setup-1.3.1.exe`), and run it.
 
 > The installer is **not code-signed**, so Windows SmartScreen may show "Windows protected your PC".
 > Click **More info → Run anyway** if you trust this release (verify the SHA-256 first).
@@ -116,7 +116,7 @@ Installing over an older version keeps your `config.json`.
 Settings → Apps → Rosa Thermal Guard → Uninstall. This stops the app, restores the original power, GPU and
 fan settings, removes the scheduled task and deletes the program and its data folder.
 
-The shared Rosa Guard component (`%CommonProgramFiles%\RosaGuard\TabHost`) is removed only when no other Rosa Guard app
+The shared Rosa Guard component (`%CommonProgramFiles%\RosaGuard\SDK`) is removed only when no other Rosa Guard app
 still uses it; uninstalling Thermal Guard just drops its own reference.
 
 ## How it works
@@ -133,14 +133,14 @@ tray and the guard both write. The report data lives in `history\` (8 days of 5-
 about 0.7 MB per day).
 
 ## Rosa Guard suite: IPC (from v1.3.0)
-Thermal Guard is the first app of the Rosa Guard suite (interop contract 1.1, Rosa Guard SDK 1.1.2) and the owner of the
+Thermal Guard is the first app of the Rosa Guard suite (interop contract 1.2, Rosa Guard SDK 1.2.0) and the owner of the
 power plan, CPU limits, GPU clocks and fans. Suite apps talk only over local named pipes (limited to your account and
 SYSTEM, identities checked both ways); no app reads another app's files.
 
-- **Standalone first**: the installer adds the shared component `%CommonProgramFiles%\RosaGuard\TabHost\1.1.2`
+- **Standalone first**: the installer adds the shared component `%CommonProgramFiles%\RosaGuard\SDK\1.2.0`
   (reference-counted). If it is missing or broken, Thermal Guard runs exactly like 1.2 (one log line:
   `[SUITE] ... standalone`). All IPC runs in its own background runspace; the guard loop never waits for it.
-  Only its IPC part is used; Thermal Guard registers no tab.
+  Upgrading from 1.3.0 moves Thermal's old `TabHost\1.1.2` reference to `SDK\1.2.0`; the `TabHost` folder is deleted once no app uses it.
 - **Publishes `thermal.pressure`** every 2 s (valid 15 s): `level` 0 = normal (CPU < 75 / GPU < 72 °C), 1 = warm or fans
   ramping (game mode: from 65 / 60 °C), 2 = Thermal Guard is limiting the CPU or GPU, 3 = critical (CPU ≥ 95 / GPU ≥ 90 °C);
   it steps down only after 30 s. Also `cpuC`, `gpuC`, `cpuTrendCPerSec`, `fanMode`, `gaming` and `cooldown`.
@@ -156,7 +156,7 @@ SYSTEM, identities checked both ways); no app reads another app's files.
 - **Gaming signal**: `suite.gaming` (from the elected detector) and `net.session.gaming` count as one more game-mode signal;
   Thermal Guard's own detection keeps working on its own. When Thermal Guard is the elected detector it publishes
   `suite.gaming` itself.
-- Diagnostics: lines with `[SUITE]` in `guard.log` show the hub link, leases and requests. Pipe
+- Diagnostics: lines with `[SUITE]` in `guard.log` show the broker link, leases and requests. Pipe
   `RosaGuard.v1.thermal.<your SID>`, registration `HKLM\SOFTWARE\RosaGuard\Apps\thermal`.
 
 ## Configuration (`config.json` in the install folder, admin-only)

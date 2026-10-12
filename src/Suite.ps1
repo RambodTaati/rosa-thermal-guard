@@ -1,10 +1,10 @@
-﻿<#  Rosa Thermal Guard - Rosa Guard suite membership (IPC), contract 1.1 (Rosa Guard SDK 1.1.2).
+﻿<#  Rosa Thermal Guard - Rosa Guard suite membership (IPC), contract 1.2 (Rosa Guard SDK 1.2.0).
     Runs in its OWN runspace inside the tray process (started by TrayApp.ps1), never on the guard engine's thread.
     It only talks to the engine through the shared $Sync table, and every value it hands over has an expiry time,
     so a hung or crashed worker can never hold cooling on (or off): leases simply run out.
     If the shared SDK component is missing or broken, this script logs one line and ends: Thermal Guard then runs
     exactly as the standalone 1.2 release does.
-    No tab, no window: Thermal has its own window only (the shared tabbed window is not used).
+    Headless: Thermal has its own window only (SDK 1.2.0 has no shared window). Like every app it is a broker candidate.
       in : $Sync.Pressure (engine), $Sync.GameMode/GameName
       out: $Sync.LeaseLevel/LeaseUntil/LeaseFrom, $Sync.SuiteGamingUntil/SuiteGamingSrc, $Sync.WifiWant/WifiWantAt (effective power-lease value + heartbeat; the engine applies it),
            $Sync.SuiteUp/SuiteState #>
@@ -24,29 +24,32 @@ $allowCool = [bool](CV $cs 'allowPeerCooldown' $true); $allowPower = [bool](CV $
 # production only: never pick up the SDK test-isolation variables
 foreach ($k in 'ROSAGUARD_TEST_PIPEPREFIX', 'ROSAGUARD_TEST_REGROOT', 'ROSAGUARD_TEST_SHAREDROOT', 'ROSAGUARD_TEST_SETTINGS', 'ROSAGUARD_TEST_STATE', 'ROSAGUARD_TEST_MUTEX', 'ROSAGUARD_TEST_NOSHOW') { [Environment]::SetEnvironmentVariable($k, $null, 'Process') }
 
-# resolve the shared SDK component (installed under its component name "TabHost"; only the IPC part is used): newest complete 1.x >= 1.1.2 under %CommonProgramFiles%\RosaGuard\TabHost (contract 11)
-$need = [version]'1.1.2'; $sdk = $null
+# resolve the shared SDK component: newest complete 1.x >= 1.2.0 under %CommonProgramFiles%\RosaGuard\SDK (contract 11).
+# The 1.1.x "TabHost" component is never used any more (no tabs; its cmdlets are gone).
+$need = [version]'1.2.0'; $sdk = $null
+$cf = $(if ($env:CommonProgramW6432) { $env:CommonProgramW6432 } else { $env:CommonProgramFiles })
 try {
-  $base = Join-Path $(if ($env:CommonProgramW6432) { $env:CommonProgramW6432 } else { $env:CommonProgramFiles }) 'RosaGuard\TabHost'
+  $base = Join-Path $cf 'RosaGuard\SDK'
   $sdk = Get-ChildItem $base -Directory -ErrorAction Stop | Where-Object { $v = $null; [version]::TryParse($_.Name, [ref]$v) -and $v.Major -eq 1 -and $v -ge $need -and (Test-Path (Join-Path $_.FullName 'rosaguard-component.json')) -and (Test-Path (Join-Path $_.FullName 'RosaGuard.psd1')) } |
          Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty FullName
 } catch {}
-if (-not $sdk) { $Sync.SuiteState = 'no-sdk'; SLog 'Rosa Guard shared component (TabHost/SDK 1.1.2+) not found - standalone'; return }
+if (-not $sdk) { $Sync.SuiteState = 'no-sdk'; SLog 'Rosa Guard shared SDK component (1.2.0+) not found - standalone'; return }
 
 $ver = '0.0.0'; try { $ver = (Get-Content (Join-Path $AppDir 'version.txt') -Raw).Trim() } catch {}
 $m = $null
 try {
   Import-Module (Join-Path $sdk 'RosaGuard.psd1') -Force -ErrorAction Stop
-  # -NoWindow: if elected hub, Thermal brokers suite.roles / suite.gaming headless (SDK 1.1.2, A10.5). No tab is registered.
-  $args2 = @{ AppId = 'thermal'; AppVersion = $ver; Capabilities = @('gaming.detect'); Peers = @{ net = @('net.session') }; NoWindow = $true }
+  # own server + broker candidacy (if elected, Thermal brokers suite.roles / suite.gaming; always headless in SDK 1.2) + peer link
+  $args2 = @{ AppId = 'thermal'; AppVersion = $ver; Capabilities = @('gaming.detect'); Peers = @{ net = @('net.session') } }
   $m = Start-RosaGuardSuiteMember @args2
   if (-not $m.Listening) { SLog 'own pipe could not be created (name in use?) - peers cannot reach Thermal; the rest of the suite link still runs' }
   if ($m.Listening) {
     [void](Enable-RosaGuardCooldownLeases -Server $m.Server -MaxLeases 8 -MaxDurationSec 600)
-    $m.Server.Cooldown.Accepting = $allowCool
+    $m.Server.Cooldown.SetAccepting($allowCool)   # off (suite.allowPeerCooldown = false): denies requests, revokes leases (holders get thermal.lease revoked/disabled)
     $Sync.Leases = [hashtable]::Synchronized(@{})
     [void](Enable-RosaGuardPowerLeases -Server $m.Server -MaxLeases 8 -MaxDurationSec 3600)   # thermal.request_power_setting / cancel / thermal.leases
-    $m.Server.Power.Accepting = $allowPower
+    $m.Server.Power.SetAccepting($allowPower)
+    # thermal.lease events (contract 9.6) are published by the SDK itself for every lease change
     Register-RosaGuardLeaseHandler -Server $m.Server -Handler {
       param($l)
       if ($l.type -eq 'power') {   # the engine applies the effective value (heartbeat below); here only the log
@@ -54,17 +57,21 @@ try {
         $Sync.WifiWant = [string]$l.effectiveValue; $Sync.WifiFrom = "$($l.peerAppId): $($l.reason)"; $Sync.WifiWantAt = Get-Date
         return
       }
-      if ($l.action -eq 'granted') {
+      if ($l.action -in @('granted', 'replaced', 'renewed')) {   # all three = active (a cooldown re-request is 'replaced' since SDK 1.2)
         $exp = [datetime]::MinValue; try { $exp = ([datetime]::Parse([string]$l.expiresUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)).ToLocalTime() } catch { $exp = (Get-Date).AddSeconds(60) }
         $Sync.Leases[[string]$l.peerAppId] = @{ Level = [string]$l.level; Until = $exp; Reason = [string]$l.reason }
-        SLog "cooldown lease granted to $($l.peerAppId): $($l.level), $($l.reason), until $($exp.ToString('HH:mm:ss'))"
+        SLog "cooldown lease $($l.action) for $($l.peerAppId): $($l.level), $($l.reason), until $($exp.ToString('HH:mm:ss'))"
       } else {
         $Sync.Leases.Remove([string]$l.peerAppId); SLog "cooldown lease of $($l.peerAppId) $($l.action)$(if ($l.why) { " ($($l.why))" })"
       }
     }
   }
   $Sync.SuiteState = 'suite'
-  SLog ("suite member started (SDK {0}, pipe {1}, headless hub candidate, no tab)" -f (Split-Path $sdk -Leaf), $(if ($m.Listening) { 'listening' } else { 'NOT listening' }))
+  # 1.1.x -> 1.2.0: the installer already dropped Thermal's TabHost ref; if files were in use then (PendingDelete), retry here
+  if ((Test-Path (Join-Path $cf 'RosaGuard\TabHost')) -or (Test-Path 'HKLM:\SOFTWARE\RosaGuard\Shared\TabHost')) {
+    try { $mg = Invoke-RosaGuardLegacyTabHostMigration -AppId thermal; SLog ("legacy TabHost: dropped ref {0}, remaining 1.1 refs {1}, pending delete {2}" -f $mg.DroppedLegacyRef, $mg.RemainingLegacyRefs, (@($mg.PendingDelete) -join ',')) } catch { SLog "legacy TabHost cleanup: $($_.Exception.Message)" }
+  }
+  SLog ("suite member started (SDK {0}, pipe {1}, broker candidate{2})" -f (Split-Path $sdk -Leaf), $(if ($m.Listening) { 'listening' } else { 'NOT listening' }), $(if ($m.Broker -and (Get-RosaGuardBrokerInfo -Broker $m.Broker).isBroker) { ', elected broker' } else { '' }))
 } catch {
   $Sync.SuiteState = 'error'; SLog "suite start failed - standalone: $($_.Exception.Message)"
   if ($m) { try { Stop-RosaGuardSuiteMember -Member $m } catch {} }
@@ -91,7 +98,7 @@ try {
       if ($ns -and $ns.gaming) { $g = $true; $src = "net.session$(if ($ns.app) { " ($($ns.app))" })" }
       if ($g) { $Sync.SuiteGamingUntil = $now.AddSeconds(6); $Sync.SuiteGamingSrc = $src }
       $up = $m.Link.IsUp('suite'); $Sync.SuiteUp = $up
-      if ($up -ne $wasUp) { SLog ("hub link " + $(if ($up) { 'up' } else { 'down' })); $wasUp = $up }
+      if ($up -ne $wasUp) { SLog ("broker link " + $(if ($up) { 'up' } else { 'down' })); $wasUp = $up }
     } catch {}
     # thermal.pressure every 2 s (contract: at most 5 s; ttl 15 s); only from a fresh engine reading
     if (($now - $lastPub).TotalSeconds -ge 2 -and $m.Listening) {

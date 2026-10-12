@@ -20,7 +20,8 @@ $args_ = @{ TaskName = 'RosaThermalGuard'; Action = $action; Principal = $princi
 # upgrade: keep Rosa's "Start with Windows" choice from the app window (a disabled logon trigger stays disabled)
 $keepOff = $false
 try { $old = Get-ScheduledTask -TaskName RosaThermalGuard -ErrorAction Stop; $lt = @($old.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }); $keepOff = ($lt.Count -gt 0 -and -not ($lt | Where-Object { $_.Enabled })) } catch {}
-if ($Autostart -ne 0) { $args_.Trigger = New-ScheduledTaskTrigger -AtLogOn }
+# logon trigger with the suite's staggered delay for thermal (15 s, CONTRACT 1.2 section 16; Thermal is first)
+if ($Autostart -ne 0) { $tr = New-ScheduledTaskTrigger -AtLogOn; $tr.Delay = 'PT15S'; $args_.Trigger = $tr }
 Register-ScheduledTask @args_ | Out-Null
 if ($Autostart -ne 0 -and $keepOff) {
   $t = Get-ScheduledTask -TaskName RosaThermalGuard; foreach ($x in $t.Triggers) { $x.Enabled = $false }; Set-ScheduledTask -InputObject $t | Out-Null

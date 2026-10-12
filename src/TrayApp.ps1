@@ -251,7 +251,7 @@ function Start-AutoJob([string]$op) {
     try {
       $t = Get-ScheduledTask -TaskName RosaThermalGuard -ErrorAction Stop
       $lt = @($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })
-      if ($op -eq 'on') { if ($lt.Count) { foreach ($x in $lt) { $x.Enabled = $true } } else { $t.Triggers = @($t.Triggers) + @(New-ScheduledTaskTrigger -AtLogOn) }; [void](Set-ScheduledTask -InputObject $t -ErrorAction Stop) }
+      if ($op -eq 'on') { if ($lt.Count) { foreach ($x in $lt) { $x.Enabled = $true } } else { $nt = New-ScheduledTaskTrigger -AtLogOn; $nt.Delay = 'PT15S'; $t.Triggers = @($t.Triggers) + @($nt) }; [void](Set-ScheduledTask -InputObject $t -ErrorAction Stop) }
       elseif ($op -eq 'off' -and $lt.Count) { foreach ($x in $lt) { $x.Enabled = $false }; [void](Set-ScheduledTask -InputObject $t -ErrorAction Stop) }
       $t = Get-ScheduledTask -TaskName RosaThermalGuard -ErrorAction Stop
       [bool](@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and $_.Enabled }).Count)
