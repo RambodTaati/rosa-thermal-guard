@@ -116,5 +116,11 @@
     "pwsh",
     "wscript",
     "nvidia-smi"
-  ]
+  ],
+  "suite": {
+    "enabled": true,
+    "allowPeerCooldown": true,
+    "allowPowerSetting": true,
+    "leaseFanShiftC": 5
+  }
 }

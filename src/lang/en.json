@@ -103,5 +103,7 @@
   "rpGpu100": "GPU time above 100\u00b0",
   "rp100Sub": "{0} episodes \u00b7 longest {1}",
   "lgOver100": "Above 100\u00b0",
-  "evCpuFast": "CPU jumped to {0}\u00b0 \u2014 turbo off early"
+  "evCpuFast": "CPU jumped to {0}\u00b0 \u2014 turbo off early",
+  "autoStart": "Start with Windows",
+  "autoStartTip": "Starts minimized to the tray when you sign in, without opening this window"
 }

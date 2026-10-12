@@ -86,6 +86,18 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{commonappdata}\RosaThermalGuard"
 
+; ---- Rosa Guard suite (contract 1.1): HKLM registration as app "thermal" + the shared TabHost/SDK component, ref-counted ----
+#define RG_AppId          "thermal"
+#define RG_AppVersion     AppVersion
+#define RG_DisplayName    AppName
+#define RG_Capabilities   "gaming.detect"
+#define RG_ScriptPath     "TrayApp.ps1"
+#define RG_RunsElevated   "1"
+#define RG_TabHostVersion "1.1.2"
+#define RG_TabHostSource  "..\..\RosaGuard-SDK"
+#define RG_NoAutoHooks
+#include "RosaGuardShared.iss"
+
 [Code]
 function AutoFlag(Param: String): String;
 begin
@@ -118,8 +130,14 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var RC: Integer;
 begin
+  RosaGuard_CurStepChanged(CurStep);   { registration hashes + shared component + this app's ref }
   if (CurStep = ssPostInstall) and (not WizardSilent()) then
     if not RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\PawnIO') then
       if MsgBox(CustomMessage('NoPawnIO'), mbConfirmation, MB_YESNO) = IDYES then
         ShellExec('open', 'https://pawnio.eu', '', '', SW_SHOWNORMAL, ewNoWait, RC);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  RosaGuard_CurUninstallStepChanged(CurUninstallStep);   { drops only Thermal's ref; the component stays while other apps use it }
 end;

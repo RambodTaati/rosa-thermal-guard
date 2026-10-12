@@ -5,12 +5,16 @@
 一个小巧的 Windows 托盘程序，让 **CPU 和 GPU 保持在 100 °C 以下**。芯片变热时，它先平缓地提高风扇转速（技嘉笔记本），
 再逐级降低性能；降温后恢复全速，并把风扇交还给厂商的自动模式。
 
-![Rosa Thermal Guard](../../releases/download/v1.2.0/screenshot-zh-CN.png)
+![Rosa Thermal Guard](../../releases/download/v1.3.0/screenshot-zh-CN.png)
 
 ## 功能
 - **实时监控**：来自 LibreHardwareMonitor 的 CPU / GPU 温度、两个温度环（0–100 °C 线性），每个外圈有一条细的风扇转速环（占该风扇最大转速的百分比，加速时更亮，悬停显示转速），带旋转图标和速度条的风扇行，以及 5 分钟图表
   （温度、两个风扇的转速占各自最大值的百分比，以及风扇加速、100% 和游戏模式的色带）。
-- **托盘图标**显示 CPU 温度并变色：绿 = 正常，橙 = 降温中，红 = 过热，灰 = 已暂停。左键打开窗口，右键打开菜单。
+- **托盘图标**（Rosa Guard 系列设计，从 v1.3.0 起）：Thermal Guard 玫红色（#DB2777）的温度计轮廓，内有白色数字显示实时 CPU 温度。
+  温度计按状态填色：绿 = 正常，橙 = 限制性能 / 降温中，红 = 过热，灰 = 已暂停；100 °C 及以上时三位数字占满整个底板（绝不显示“99+”）。
+  图标在运行时按任务栏所在显示器的 DPI 绘制（16/20/24/32 像素），并区分浅色和深色任务栏。游戏模式显示在提示和窗口中，而不在图标上。左键打开窗口，右键打开菜单。
+- **Rosa Guard 套件**（从 v1.3.0 起）：向其他 Rosa Guard 应用发布热压力，接受降温租约和无线网卡节能请求，同时仍可完全独立运行
+  （见下文）。始终使用自己的窗口。
 - **每秒读取一次传感器**（`pollSeconds`）。所有保持时间、渐变、平滑窗口和尖峰过滤都以秒为单位，改变读取间隔不会改变行为。
   程序本身很轻（传感器对象缓存；风扇转速每次读取，风扇模式每 5 秒读取；有活动时每 5 秒、否则每 60 秒记录一行温度）。
 - **CPU 降频**：通过 Windows 电源计划（“最大处理器状态”，所有核心类型，交流和电池）：100 → 99（关闭睿频）→ 85 → 70 → 55%，每次一级。
@@ -37,7 +41,8 @@
   而风扇仍被接管时自动交还。能检测睡眠/唤醒并重新读取一切。只使用厂商支持的调用（Windows 电源计划、`nvidia-smi`、技嘉 WMI）。
 - **暂停** 15 分钟（CPU 达到 97 °C 时自动取消）。
 - **4 种语言**：English、فارسی、العربية、简体中文（自动检测，可在窗口中切换；波斯语和阿拉伯语为从右到左）。
-- **随 Windows 启动**（计划任务，管理员权限，每次登录不弹 UAC）。
+- **随 Windows 启动**（计划任务，管理员权限，每次登录不弹 UAC），隐藏在托盘中：不显示窗口，不抢焦点。可在窗口中用
+  **随 Windows 启动** 开关关闭或开启（默认开启；更新时保留你的选择）。
 - **自动更新**（从 v1.2.0 起）：大约每天一次（以及启动约 5 分钟后）向 GitHub 查询最新版本。新安装程序只从该版本页通过 HTTPS 下载，
   其 SHA-256 必须与该版本的 `SHA256SUMS.txt`（以及 GitHub 自身的摘要）一致，文件名、大小和版本信息也必须属于本安装程序，否则什么都不会运行。
   只在安全时静默安装（非游戏模式、温度正常、一分钟内无降频和风扇接管），安装前先恢复风扇、电源计划和 GPU 设置；保留 `config.json`，
@@ -69,8 +74,8 @@
 - 风扇控制需要带 WMI 接口的技嘉笔记本（Control Center 可以保留）
 
 ## 安装
-从 Releases 页面下载 `RosaThermalGuard-Setup-1.2.0.exe`，对照 `SHA256SUMS.txt` 校验
-（`Get-FileHash .\RosaThermalGuard-Setup-1.2.0.exe`），然后运行。
+从 Releases 页面下载 `RosaThermalGuard-Setup-1.3.0.exe`，对照 `SHA256SUMS.txt` 校验
+（`Get-FileHash .\RosaThermalGuard-Setup-1.3.0.exe`），然后运行。
 
 > 安装程序**没有代码签名**，Windows SmartScreen 可能提示“Windows 已保护你的电脑”。
 > 如信任此版本（请先校验 SHA-256），点击 **更多信息 → 仍要运行**。
@@ -81,6 +86,9 @@
 
 ## 卸载
 设置 → 应用 → Rosa Thermal Guard → 卸载。会停止程序，恢复原始电源、GPU 和风扇设置，删除计划任务以及程序和数据文件夹。
+
+共享的 Rosa Guard 组件（`%CommonProgramFiles%\RosaGuard\TabHost`）只有在没有其他 Rosa Guard 应用使用时才会被删除；卸载
+Thermal Guard 只会移除它自己的引用。
 
 ## 工作方式
 | | 降频 | 临界 | 恢复 |
@@ -93,6 +101,29 @@
 日志位于 `%ProgramData%\RosaThermalGuard\guard.log`。达到 `logging.maxSizeMB` 时轮转为压缩的 `guard.1.log.gz`、
 `guard.2.log.gz` …（受 `keepFiles`、`keepDays`、`totalMaxMB` 限制）；托盘和守护进程同时写入时轮转也是安全的。
 报告数据位于 `history\`（8 天的 5 秒数据行和 7 天的事件，每天约 0.7 MB）。
+
+## Rosa Guard 套件：应用间通信（从 v1.3.0 起）
+Thermal Guard 是 Rosa Guard 套件的第一个应用（互操作协议 1.1，Rosa Guard SDK 1.1.2），也是电源计划、CPU 限制、GPU 频率和风扇的
+所有者。套件中的应用只通过本地命名管道通信（仅限你的账户和 SYSTEM，双向校验身份）；任何应用都不读取其他应用的文件。
+
+- **独立优先**：安装程序会添加共享组件 `%CommonProgramFiles%\RosaGuard\TabHost\1.1.2`（引用计数）。如果它缺失或损坏，
+  Thermal Guard 的运行与 1.2 完全相同（日志中只有一行：`[SUITE] ... standalone`）。所有通信都在单独的后台 runspace 中运行，
+  保护循环从不等待它。
+  只使用其中的通信部分；Thermal Guard 不注册任何标签页。
+- **发布 `thermal.pressure`**，每 2 秒一次（有效 15 秒）：`level` 0 = 正常（CPU < 75 / GPU < 72 °C），1 = 偏热或风扇正在升速
+  （游戏模式：从 65 / 60 °C 起），2 = Thermal Guard 正在限制 CPU 或 GPU，3 = 危急（CPU ≥ 95 / GPU ≥ 90 °C）；降级需等待 30 秒。
+  另含 `cpuC`、`gpuC`、`cpuTrendCPerSec`、`fanMode`、`gaming` 和 `cooldown`。
+- **降温租约**（`thermal.request_cooldown`）：其他应用（例如下载器在大任务前）可以申请 10–600 秒的额外降温。`mild` = 风扇曲线提前
+  5 °C 开始（`suite.leaseFanShiftC`，同样平缓渐变）；`strong` = 另外关闭睿频。租约只会增加降温，绝不会取消任何保护步骤；最多
+  8 个应用，每个一份租约，到期、取消或申请方断开连接时立即结束。关闭：`suite.allowPeerCooldown = false`。
+- **无线网卡节能**（`thermal.request_power_setting`）：Net Guard 可以请求电源计划所有者 Thermal Guard，在 30–3600 秒内把当前计划的
+  *Wireless Adapter Settings → Power Saving Mode* 设为 Maximum Performance。原始值会先保存（防崩溃，`wifistate.json`），并在到期、
+  取消、断开、退出、崩溃和卸载时恢复；压力等级 3 时拒绝，达到等级 3 时立即撤销；仅限已验证的应用；续租保持同一个 `leaseId`，
+  `thermal.leases` 查询可列出当前租约。关闭：`suite.allowPowerSetting = false`。
+- **游戏信号**：`suite.gaming`（来自选出的检测者）和 `net.session.gaming` 作为游戏模式的又一个信号；Thermal Guard 自己的检测照常
+  独立工作。Thermal Guard 被选为检测者时会自己发布 `suite.gaming`。
+- 诊断：`guard.log` 中带 `[SUITE]` 的行显示 hub 连接、租约和请求。管道 `RosaGuard.v1.thermal.<你的 SID>`，注册表
+  `HKLM\SOFTWARE\RosaGuard\Apps\thermal`。
 
 ## 配置（安装目录中的 `config.json`，仅管理员）
 修改后请重启程序（托盘菜单 → 退出，再启动）。温度单位 °C，时间单位秒，风扇值为满转的百分比。曲线是 `[温度, 百分比]` 点的列表，线性插值。
@@ -157,6 +188,10 @@
 | `logging.keepDays` | 7 | 早于此天数的归档会被删除 |
 | `logging.totalMaxMB` | 20 | 所有日志合计上限（最旧的归档先删除） |
 | `logging.tempsEverySec` | 5 | 有活动时温度行的写入间隔（空闲时 60 秒）；事件总是记录 |
+| `suite.enabled` | true | 安装了共享组件时加入 Rosa Guard 套件（false = 始终独立运行） |
+| `suite.allowPeerCooldown` | true | 接受其他 Rosa Guard 应用的降温租约（它们只能增加降温） |
+| `suite.allowPowerSetting` | true | 接受 Net Guard 的无线网卡节能请求（到期 / 退出时恢复） |
+| `suite.leaseFanShiftC` | 5 | 降温租约期间风扇曲线提前多少 °C 开始（0–10） |
 | `protectedProcesses` | … | 永不修改优先级的进程（系统列表） |
 ## 故障排除
 - **CPU 显示“--”或一直等待**：安装 PawnIO 并确认是管理员账户；在 `guard.log` 中查找 `CPU temperature not available`。

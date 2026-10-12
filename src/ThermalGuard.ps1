@@ -547,7 +547,45 @@ $FAN_CRIT_SEC = [Math]::Max(0.0, [double](CfgVal $cFan 'criticalSeconds' 4))   #
 # ---- game mode: earlier, steeper fan curve and a protected game process while a game is running ----
 $cGame = CfgVal $cFan 'gameMode' $null
 $GM_ON = [bool](CfgVal $cGame 'enabled' $true)
-$GM_GPU_UTIL = [double](CfgVal $cGame 'gpuUtilPercent' 60)       # GPU load that counts as "busy"
+# ---- Rosa Guard suite (v1.3): the IPC worker in the tray process feeds $Sync; nothing here waits on a peer ----
+$cSuite = CfgVal $Cfg 'suite' $null
+$LEASE_FAN_C = [Math]::Max(0.0, [Math]::Min(10.0, [double](CfgVal $cSuite 'leaseFanShiftC' 5)))   # cooldown lease: fan curve this many C earlier (+1 step)
+$PR_DOWN_SEC = 30            # thermal.pressure steps down only after 30 s below (contract 7.4)
+$WifiStateFile = Join-Path $DataDir 'wifistate.json'   # original wireless power-saving values while a peer holds a lease (crash-safe)
+$WIFI_SUB = '19cbb8fa-5279-450e-9fac-8a3d5fedd0c1'; $WIFI_SET = '12bbebe6-58d6-4636-95bb-3217ef867c1a'
+$script:WifiApplied = 'default'; $script:LeaseNow = $null; $script:PrLevel = 0; $script:PrLowSince = $null
+function Get-WifiPs([string]$scheme) {
+  $o = powercfg /q $scheme $WIFI_SUB $WIFI_SET 2>$null
+  $ac = $o | Select-String 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)' | Select-Object -First 1
+  $dc = $o | Select-String 'Current DC Power Setting Index:\s*0x([0-9a-fA-F]+)' | Select-Object -First 1
+  if (-not $ac -or -not $dc) { return $null }
+  @{ AC = [Convert]::ToInt32($ac.Matches[0].Groups[1].Value, 16); DC = [Convert]::ToInt32($dc.Matches[0].Groups[1].Value, 16) }
+}
+function Restore-Wifi([string]$why) {
+  $script:WifiApplied = 'default'
+  if (-not (Test-Path $WifiStateFile)) { return }
+  try {
+    $w = Get-Content $WifiStateFile -Raw | ConvertFrom-Json
+    powercfg /setacvalueindex $w.Scheme $WIFI_SUB $WIFI_SET ([int]$w.AC) 2>$null | Out-Null
+    powercfg /setdcvalueindex $w.Scheme $WIFI_SUB $WIFI_SET ([int]$w.DC) 2>$null | Out-Null
+    powercfg /setactive $w.Scheme 2>$null | Out-Null
+    $now = Get-WifiPs $w.Scheme
+    Write-Log "wireless power saving restored ($why): AC=$($now.AC) DC=$($now.DC)"
+    Remove-Item $WifiStateFile -Force -ErrorAction SilentlyContinue
+  } catch { Write-Log "wireless power saving restore failed: $($_.Exception.Message)" }
+}
+function Apply-WifiMax([string]$from) {
+  $script:WifiApplied = 'max_performance'   # also on failure: no retry storm; the next change of the lease state tries again
+  if (Test-Path $WifiStateFile) { return }
+  $scheme = ((powercfg /getactivescheme) -replace '.*GUID:\s*([0-9a-fA-F-]{36}).*', '$1').Trim()
+  $o = Get-WifiPs $scheme
+  if (-not $o) { Write-Log "wireless power saving: this power plan has no such setting - lease from $from not applied"; return }
+  @{ Scheme = $scheme; AC = $o.AC; DC = $o.DC } | ConvertTo-Json | Set-Content $WifiStateFile -Encoding ASCII   # saved first: crash-safe
+  powercfg /setacvalueindex $scheme $WIFI_SUB $WIFI_SET 0 2>$null | Out-Null
+  powercfg /setdcvalueindex $scheme $WIFI_SUB $WIFI_SET 0 2>$null | Out-Null
+  powercfg /setactive $scheme 2>$null | Out-Null
+  Write-Log "wireless power saving -> Maximum Performance (power lease: $from; was AC=$($o.AC) DC=$($o.DC))"
+}$GM_GPU_UTIL = [double](CfgVal $cGame 'gpuUtilPercent' 60)       # GPU load that counts as "busy"
 $GM_ENTER = [int](CfgVal $cGame 'enterSeconds' 10)               # game signs for this long -> game mode on
 $GM_EXIT = [int](CfgVal $cGame 'exitSeconds' 60)                 # no game signs for this long -> game mode off
 $GM_FULLSCREEN = [bool](CfgVal $cGame 'detectFullscreen' $true)
@@ -855,6 +893,7 @@ if (-not $Restore) {
 $prev = Load-State
 if ($prev) { $State = $prev; Restore-All 'previous run did not exit cleanly' }
 if (Test-Path $FanStateFile) { Restore-Fan 'previous run did not exit cleanly' }
+if (Test-Path $WifiStateFile) { Restore-Wifi 'previous run did not exit cleanly' }
 if ($Restore) { exit 0 }
 
 try { Open-Sensors } catch { Write-Log "cannot load LibreHardwareMonitor: $($_.Exception.Message)"; exit 2 }
@@ -906,6 +945,13 @@ try {
     }
     $lastLoopAt = $now
     $cpu = $t.Cpu; $gpu = $t.Gpu
+    $lease = $null
+    if ($Sync -and $Sync.LeaseLevel -and $Sync.LeaseUntil -is [datetime] -and $Sync.LeaseUntil -gt $now) { $lease = [string]$Sync.LeaseLevel }
+    if ($lease -ne $script:LeaseNow) {
+      if ($lease) { Write-Log "peer cooldown lease: $lease ($($Sync.LeaseFrom)) - fan curve ${LEASE_FAN_C} C earlier$(if ($lease -eq 'strong') { ', turbo off' }); protection unchanged" }
+      else { Write-Log 'peer cooldown lease ended - normal curve (steps back only through the usual cool timers)' }
+      $script:LeaseNow = $lease
+    }
 
     $paused = $false
     if ($Sync -and $Sync.PauseUntil -gt $now) {
@@ -919,6 +965,7 @@ try {
     if ($wasPaused -and -not $paused) { Write-Log 'guard resumed' }
     $wasPaused = $paused
 
+    if ($lease -eq 'strong' -and -not $paused -and $CpuLevel -eq 0) { Write-Log 'strong cooldown lease - turbo off (level 1)'; Apply-CpuLevel 1; $lastStep = $now; $lastStepTemp = $cpu; $coolSince = $null }
     $cpuHotSince = $(if ($cpu -ne $null -and $cpu -ge $CPU_HOT) { if ($cpuHotSince) { $cpuHotSince } else { $now } } else { $null })
     $gpuHotSince = $(if ($gpu -ne $null -and $gpu -ge $GPU_HOT) { if ($gpuHotSince) { $gpuHotSince } else { $now } } else { $null })
     if ($paused) { $coolSince = $null }
@@ -956,7 +1003,7 @@ try {
         if ($cpu -ge $CPU_CRIT -and ($now - $script:TopScanAt).TotalSeconds -ge 5) { $script:TopScanAt = $now; Lower-Priority (Get-TopCpuProcesses $TOP_N) "CPU $cpu C" }   # the scan samples for 1 s: at most every 5 s
       } elseif ($cpu -lt $CPU_COOL -and ($CpuLevel -gt 0 -or $Reniced.Count -gt 0)) {
         if (-not $coolSince) { $coolSince = $now }
-        elseif (($now - $coolSince).TotalSeconds -ge $(if ($CpuLevel -eq 1) { $restoreHold } else { $COOL_SECONDS }) -and ($CpuLevel -ne 1 -or -not $SG_ON -or -not $lastSpikeAt -or ($now - $lastSpikeAt).TotalSeconds -ge (SG-Hold))) {
+        elseif (($now - $coolSince).TotalSeconds -ge $(if ($CpuLevel -eq 1) { $restoreHold } else { $COOL_SECONDS }) -and ($CpuLevel -ne 1 -or -not $SG_ON -or -not $lastSpikeAt -or ($now - $lastSpikeAt).TotalSeconds -ge (SG-Hold)) -and -not ($CpuLevel -eq 1 -and $lease -eq 'strong')) {
           Write-Log "CPU cool: $cpu C"
           if ($CpuLevel -gt 0) { Apply-CpuLevel ($CpuLevel - 1) }
           if (-not $GpuThrottled) { Restore-Priorities }
@@ -1002,10 +1049,11 @@ try {
       $listedFg = $fgName -and ($GM_EXES -contains $fgName)
       $fullFg = $GM_FULLSCREEN -and $fgi -and $fgi.Full -and ($GM_EXCL -notcontains $fgName)
       $busy = $gl -ne $null -and $gl -ge $GM_GPU_UTIL
-      $cand = [bool]$simGame -or $listedFg -or ($busy -and ($fullFg -or $gmListed.Count -gt 0))
+      $suiteG = $Sync -and $Sync.SuiteGamingUntil -is [datetime] -and $Sync.SuiteGamingUntil -gt $now
+      $cand = [bool]$simGame -or $listedFg -or ($busy -and ($fullFg -or $gmListed.Count -gt 0)) -or $suiteG
       if ($cand) { $gmIdleSince = $null; if (-not $gmCandSince) { $gmCandSince = $now } } else { $gmCandSince = $null; if (-not $gmIdleSince) { $gmIdleSince = $now } }
       if (-not $GameMode -and $gmCandSince -and ($now - $gmCandSince).TotalSeconds -ge $GM_ENTER) {
-        $why = if ($simGame) { "simulated: $simGame" } elseif ($listedFg) { "listed game in front: $($fgi.Name)" } elseif ($fullFg) { "GPU $([int]$gl)% + fullscreen $($fgi.Name)" } else { "GPU $([int]$gl)% + listed game running: $($gmListed[0].ProcessName)" }
+        $why = if ($simGame) { "simulated: $simGame" } elseif ($suiteG -and -not ($listedFg -or ($busy -and ($fullFg -or $gmListed.Count -gt 0)))) { "suite: $($Sync.SuiteGamingSrc)" } elseif ($listedFg) { "listed game in front: $($fgi.Name)" } elseif ($fullFg) { "GPU $([int]$gl)% + fullscreen $($fgi.Name)" } else { "GPU $([int]$gl)% + listed game running: $($gmListed[0].ProcessName)" }
         $script:GameMode = $true; $script:GameProtectLogged = $false
         $script:GameName = $(if ($simGame) { $simGame } elseif ($listedFg -or $fullFg) { $fgi.Name } elseif ($gmListed.Count) { $gmListed[0].ProcessName } else { $null })
         Write-Log "game mode ON ($why) - earlier fan curve, the game is protected from priority changes"
@@ -1045,7 +1093,8 @@ try {
         $tempTxt = "CPU $fc C, GPU $fg C smoothed (now $cpu / $gpu)$(if ($GameMode) { ' [game mode]' })"
         # critical = raw heat at/above the critical point for criticalSeconds, or the (warmed-up) smoothed value there
         $crit = ($fanCritSince -and ($now - $fanCritSince).TotalSeconds -ge $FAN_CRIT_SEC) -or ($fanWarm -and (Fan-Critical $fc $fg))
-        $demand = Fan-Demand $fc $fg 0
+        $lOff = $(if ($lease) { $LEASE_FAN_C } else { 0.0 })
+        $demand = Fan-Demand $fc $fg (-$lOff)
         $obs = Fan-ObservedPct
         if (-not $FanBoosted) {
           $fanRelSince = $null
@@ -1069,7 +1118,7 @@ try {
             if ($want -gt $FanTarget + 0.5) { $script:FanTarget = $want; $script:FanRaiseAt = $now }
             elseif (($now - $FanRaiseAt).TotalSeconds -ge $FAN_MIN_HOLD) {
               # decreases use the curve shifted by the hysteresis (as if it were $FAN_HYST C hotter), so small wobbles don't move the fans
-              $down = [Math]::Max((Fan-Demand $fc $fg (-$FAN_HYST)), $floor)
+              $down = [Math]::Max((Fan-Demand $fc $fg (-$FAN_HYST - $lOff)), $floor)
               if ($down -lt $FanTarget - 0.5) { $script:FanTarget = $down }
             }
             # hand back to auto: cool long enough, held long enough, and already ramped down to about auto speed
@@ -1104,7 +1153,30 @@ try {
       $lastRescan = $now
       try { $Computer.Close(); Open-Sensors; if ($HasNvidia) { Init-Nvidia } } catch {}
     }
+    # thermal.pressure (contract 7.4): 3 critical, 2 throttling, 1 warm / fans ramping, 0 normal; up at once, down after 30 s
+    $pcs = $(if ($fanCpuS -ne $null) { $fanCpuS } else { $cpu }); $pgs = $(if ($fanGpuS -ne $null) { $fanGpuS } else { $gpu })
+    $wc = $(if ($GameMode) { 65 } else { 75 }); $wg = $(if ($GameMode) { 60 } else { 72 })
+    $prRaw = 0; $prWhy = 'normal'
+    if (($fanCritSince -and ($now - $fanCritSince).TotalSeconds -ge $FAN_CRIT_SEC) -or ($pcs -ne $null -and $pcs -ge 95) -or ($pgs -ne $null -and $pgs -ge 90)) { $prRaw = 3; $prWhy = 'critical' }
+    elseif ($CpuLevel -gt 0 -or $GpuThrottled) { $prRaw = 2; $prWhy = $(if ($CpuLevel -gt 0) { 'cpu.limited' } else { 'gpu.limited' }) }
+    elseif ($FanBoosted -or ($pcs -ne $null -and $pcs -ge $wc) -or ($pgs -ne $null -and $pgs -ge $wg)) { $prRaw = 1; $prWhy = $(if ($FanBoosted) { 'fans.ramping' } else { 'warm' }) }
+    if ($prRaw -ge $script:PrLevel) { $script:PrLevel = $prRaw; $script:PrLowSince = $null }
+    elseif (-not $script:PrLowSince) { $script:PrLowSince = $now }
+    elseif (($now - $script:PrLowSince).TotalSeconds -ge $PR_DOWN_SEC) { $script:PrLevel = $prRaw; $script:PrLowSince = $null }
+    # wireless power-saving leases (thermal.request_power_setting): the SDK decides the leases, the worker hands over the
+    # effective value with a heartbeat; only the owner (here) changes the plan. Stale (worker gone) or critical = default.
+    $ww = 'default'; $wwWhy = 'no lease'
+    if ($Sync -and $Sync.WifiWant -eq 'max_performance') {
+      if (-not ($Sync.WifiWantAt -is [datetime]) -or ($now - $Sync.WifiWantAt).TotalSeconds -gt 30) { $wwWhy = 'suite worker silent' }
+      elseif ($script:PrLevel -ge 3) { $wwWhy = 'critical temperature' }
+      else { $ww = 'max_performance' }
+    }
+    if ($ww -ne $script:WifiApplied) { try { if ($ww -eq 'max_performance') { Apply-WifiMax ([string]$Sync.WifiFrom) } else { Restore-Wifi $wwWhy } } catch { Write-Log "wireless power saving: $($_.Exception.Message)" } }
     if ($Sync) {
+      $Sync.Pressure = @{ level = $script:PrLevel; cpuC = $(if ($cpu -ne $null) { [Math]::Round([double]$cpu, 1) } else { $null }); gpuC = $(if ($gpu -ne $null) { [Math]::Round([double]$gpu, 1) } else { $null })
+        trend = $(if ($rise -ne $null) { [Math]::Max(-50.0, [Math]::Min(50.0, [Math]::Round([double]$rise, 1))) } else { 0.0 })
+        fanMode = $(if (-not $FanOk) { 'unknown' } elseif ($FanBoosted -and $FanLevel -ge 2) { 'max' } elseif ($FanBoosted) { 'ramp' } else { 'auto' })
+        gaming = [bool]$GameMode; reason = $(if ($script:PrLevel -eq $prRaw) { $prWhy } else { 'cooling.down' }); at = $now; wifi = $(if ($script:WifiApplied -eq 'max_performance') { 1 } else { 0 }) }
       $Sync.Cpu = $cpu; $Sync.Gpu = $gpu; $Sync.Level = $CpuLevel; $Sync.MaxPct = $CPU_STEPS[$CpuLevel]
       $Sync.GpuThrottled = $GpuThrottled; $Sync.Paused = $paused; $Sync.HasNvidia = $HasNvidia; $Sync.Sim = $simActive
       $Sync.GpuMode = $(if ($Nv) { $Nv.Mode } else { $null }); $Sync.GpuLimitW = $(if ($Nv) { $Nv.Cur } else { $null }); $Sync.GpuDefaultW = $(if ($Nv) { $Nv.Default } else { $null }); $Sync.GpuClockCap = $(if ($Nv) { $Nv.LgcMhz } else { $null })
@@ -1128,6 +1200,7 @@ try {
   Write-Log "CRASH: $($_.Exception.Message)"; $exitCode = 1
 } finally {
   Restore-All $(if ($TestMode) { 'test finished' } else { 'guard exiting' })
+  Restore-Wifi 'guard exiting'
   try { $Computer.Close() } catch {}
   try { $mutex.ReleaseMutex() } catch {}
 }

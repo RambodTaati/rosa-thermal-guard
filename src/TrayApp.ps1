@@ -1,7 +1,9 @@
 ﻿<#  Rosa Thermal Guard - tray app (MIT License)
     One hidden PowerShell process: the guard engine (ThermalGuard.ps1) runs in a background runspace,
-    the UI is a tray icon (green / orange / red) plus a compact dark WPF window (English or Persian).
-    Flag files in %ProgramData%\RosaThermalGuard: show.flag opens the window, snap.flag saves ui.png, report.flag opens the report window, graph.flag (open/close) toggles the graph,
+    the UI is a tray icon (rose thermometer with the live CPU temperature) plus a compact dark WPF window (fa/en/ar/zh-CN).
+    Rosa Guard suite IPC (thermal.pressure, cooldown and power leases, suite.gaming) runs in a third runspace (Suite.ps1);
+    without the shared SDK component it simply does not start and the app behaves exactly like the standalone 1.2 release.
+    Flag files in %ProgramData%\RosaThermalGuard: show.flag opens the window, snap.flag saves ui.png, report.flag opens the report window, graph.flag (open/close) toggles the graph, autostart.flag (on/off) sets Start with Windows,
     minimize.flag minimizes it, stop.flag exits cleanly (settings restored). #>
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
@@ -16,7 +18,19 @@ if (-not $uiMutex.WaitOne(0)) { exit 0 }
 
 # ---------- guard engine in a runspace ----------
 $sync = [hashtable]::Synchronized(@{ Stop = $false; PauseUntil = [datetime]::MinValue; Notify = $null })
+$sync.Leases = [hashtable]::Synchronized(@{})
 $script:guardPs = $null; $script:guardHandle = $null; $script:lastGuardStart = [datetime]::MinValue
+# Rosa Guard suite IPC in its own runspace: never on the guard's thread, never blocking the UI. Missing/broken SDK = standalone.
+$script:suitePs = $null; $script:suiteHandle = $null; $script:lastSuiteStart = [datetime]::MinValue
+function Start-Suite {
+  try {
+    $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState = 'MTA'; $rs.Open()
+    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    [void]$ps.AddScript({ param($s, $f, $a, $r) & $f -Sync $s -AppDir $a -Root $r }).AddArgument($sync).AddArgument((Join-Path $AppDir 'Suite.ps1')).AddArgument($AppDir).AddArgument($Root)
+    $sync.SuiteStop = $false
+    $script:suitePs = $ps; $script:suiteHandle = $ps.BeginInvoke(); $script:lastSuiteStart = Get-Date
+  } catch { UiLog "suite worker could not start: $($_.Exception.Message)" }
+}
 function Start-Guard {
   $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState = 'MTA'; $rs.Open()
   $ps = [powershell]::Create(); $ps.Runspace = $rs
@@ -116,6 +130,15 @@ function Get-TempBrush($t) {
   $hex = if ($t -eq $null) { '#4B5263' } elseif ($t -lt 80) { '#34D399' } elseif ($t -lt 90) { '#FBBF24' } elseif ($t -lt 95) { '#FB923C' } else { '#F43F5E' }
   New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex))
 }
+function Color([string]$hex) { [Windows.Media.ColorConverter]::ConvertFromString($hex) }
+function Fade-Brush($brush, [string]$hex, [int]$ms = 450) {
+  $c = Color $hex
+  if ($brush.Color -eq $c) { return }
+  if (-not $window.IsVisible) { $brush.BeginAnimation([Windows.Media.SolidColorBrush]::ColorProperty, $null); $brush.Color = $c; return }
+  $an = New-Object Windows.Media.Animation.ColorAnimation($c, (New-Object Windows.Duration([TimeSpan]::FromMilliseconds($ms))))
+  $ez = New-Object Windows.Media.Animation.QuadraticEase; $ez.EasingMode = 'EaseInOut'; $an.EasingFunction = $ez
+  $brush.BeginAnimation([Windows.Media.SolidColorBrush]::ColorProperty, $an)
+}
 function Brush([string]$hex) { New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)) }
 $history = New-Object Collections.Generic.List[object]
 $GMIN = 30; $GMAX = 110
@@ -194,8 +217,13 @@ function Show-Window([string]$why = '') {
 }
 function Set-GraphOpen([bool]$open, [bool]$animate) {
   $script:graphOpen = $open
-  $ui.GraphChev.Text = $(if ($open) { [string][char]0x25B4 } else { [string][char]0x25BE })
   $ui.GraphBtnText.Text = $(if ($open) { $T.hideGraph } else { $T.showGraph })
+  $rt = $ui.GraphChev.RenderTransform; $deg = $(if ($open) { 180.0 } else { 0.0 })
+  if ($animate -and $window.IsVisible) {
+    $ra = New-Object Windows.Media.Animation.DoubleAnimation($deg, (New-Object Windows.Duration([TimeSpan]::FromMilliseconds(240))))
+    $re = New-Object Windows.Media.Animation.CubicEase; $re.EasingMode = 'EaseOut'; $ra.EasingFunction = $re
+    $rt.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty, $ra)
+  } else { $rt.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty, $null); $rt.Angle = $deg }
   $hp = [Windows.FrameworkElement]::HeightProperty
   if ($open) { try { Update-Graph } catch {} }
   if (-not $animate -or -not $window.IsVisible) {
@@ -213,6 +241,51 @@ function Toggle-Pause {
   if ($sync.PauseUntil -gt (Get-Date)) { $sync.PauseUntil = [datetime]::MinValue; UiLog 'resume clicked' }
   else { $sync.PauseUntil = (Get-Date).AddMinutes(15); UiLog 'pause 15 min clicked' }
 }
+# ---------- start with Windows = the logon trigger of the RosaThermalGuard task (enabled/disabled, never deleted, so the
+# Start-menu shortcut can still run the task). Task Scheduler calls take 1-3 s: they run in a short-lived runspace.
+$script:autoOn = $null; $script:autoJob = $null
+function Start-AutoJob([string]$op) {
+  if ($script:autoJob) { return }
+  $rs = [runspacefactory]::CreateRunspace(); $rs.Open(); $ps = [powershell]::Create(); $ps.Runspace = $rs
+  [void]$ps.AddScript({ param($op)
+    try {
+      $t = Get-ScheduledTask -TaskName RosaThermalGuard -ErrorAction Stop
+      $lt = @($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })
+      if ($op -eq 'on') { if ($lt.Count) { foreach ($x in $lt) { $x.Enabled = $true } } else { $t.Triggers = @($t.Triggers) + @(New-ScheduledTaskTrigger -AtLogOn) }; [void](Set-ScheduledTask -InputObject $t -ErrorAction Stop) }
+      elseif ($op -eq 'off' -and $lt.Count) { foreach ($x in $lt) { $x.Enabled = $false }; [void](Set-ScheduledTask -InputObject $t -ErrorAction Stop) }
+      $t = Get-ScheduledTask -TaskName RosaThermalGuard -ErrorAction Stop
+      [bool](@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and $_.Enabled }).Count)
+    } catch { 'error: ' + $_.Exception.Message }
+  }).AddArgument($op)
+  $script:autoJob = @{ Ps = $ps; H = $ps.BeginInvoke(); Op = $op }
+}
+function Poll-AutoJob {
+  $j = $script:autoJob; if (-not $j -or -not $j.H.IsCompleted) { return }
+  $script:autoJob = $null
+  $r = $null; try { $r = @($j.Ps.EndInvoke($j.H))[0] } catch { $r = "error: $($_.Exception.Message)" }
+  try { $j.Ps.Runspace.Dispose(); $j.Ps.Dispose() } catch {}
+  if ($r -is [bool]) { $script:autoOn = $r; if ($j.Op -ne 'get') { UiLog ("start with Windows -> " + $(if ($r) { 'on' } else { 'off' })) } }
+  else { UiLog "start with Windows ($($j.Op)) failed: $r"; if ($j.Op -ne 'get') { $script:autoOn = -not $script:autoOn }; Start-AutoJob 'get' }
+  Set-AutoUi $true
+}
+function Toggle-AutoStart {
+  if ($script:autoJob -or $script:autoOn -eq $null) { return }
+  $script:autoOn = -not $script:autoOn; Set-AutoUi $true          # optimistic, confirmed (or reverted) by Poll-AutoJob
+  Start-AutoJob $(if ($script:autoOn) { 'on' } else { 'off' })
+}
+function Set-AutoUi([bool]$animate) {
+  if (-not $ui.AutoKnob) { return }
+  $on = [bool]$script:autoOn
+  $ui.AutoRow.Opacity = $(if ($script:autoOn -eq $null) { 0.55 } else { 1.0 })
+  $x = $(if ($on) { 16.0 } else { 0.0 }); $tt = $ui.AutoKnob.RenderTransform
+  if ($animate -and $window.IsVisible) {
+    $an = New-Object Windows.Media.Animation.DoubleAnimation($x, (New-Object Windows.Duration([TimeSpan]::FromMilliseconds(180))))
+    $ez = New-Object Windows.Media.Animation.CubicEase; $ez.EasingMode = 'EaseOut'; $an.EasingFunction = $ez
+    $tt.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $an)
+  } else { $tt.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $null); $tt.X = $x }
+  Fade-Brush $ui.AutoTrack.Background $(if ($on) { '#FFDB2777' } else { '#FF2A2730' }) 180
+  Fade-Brush $ui.AutoKnob.Fill $(if ($on) { '#FFFFFFFF' } else { '#FF8C8796' }) 180
+}
 . (Join-Path $AppDir 'Report.ps1')   # graphical report window (Show-Report)
 function Build-Window {
 $xamlText = @'
@@ -220,168 +293,200 @@ $xamlText = @'
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Rosa Thermal Guard" Width="400" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True"
         Background="Transparent" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
-        FontFamily="{{font}}" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
-  <Border x:Name="Card" Margin="14" CornerRadius="20" Background="#FF15171E" BorderBrush="#FF2A2E3A" BorderThickness="1" Padding="20,16,20,18" FlowDirection="{{dir}}">
-    <Border.Effect><DropShadowEffect BlurRadius="24" ShadowDepth="4" Opacity="0.55" Color="#000000"/></Border.Effect>
+        FontFamily="{{font}}" UseLayoutRounding="True" SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display" TextOptions.TextHintingMode="Fixed">
+  <!-- palette (rose identity): card #17161C, panel #1E1C24, control #24212B, track #2A2730, line #2B2731,
+       text #F4F1F6 / #C9C5D1 / #8C8796, accent rose #DB2777 / #F472B6 / #FBCFE8. State colours stay semantic. -->
+  <Border x:Name="Card" Margin="14" CornerRadius="18" Background="#FF17161C" BorderBrush="#FF2B2731" BorderThickness="1" Padding="18,16,18,16" FlowDirection="{{dir}}">
+    <Border.Effect><DropShadowEffect BlurRadius="22" ShadowDepth="3" Opacity="0.5" Color="#000000"/></Border.Effect>
     <StackPanel>
+      <!-- header: brand mark + title | minimise, close -->
       <Grid>
-        <StackPanel Orientation="Horizontal">
-          <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#34D399" Margin="0,0,0,0" VerticalAlignment="Center"/>
-          <TextBlock Text="{{title}}" Foreground="#FFF1F3F8" FontSize="17" FontWeight="SemiBold" Margin="10,0,0,0" VerticalAlignment="Center"/>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Canvas Width="16" Height="22" VerticalAlignment="Center" FlowDirection="LeftToRight">
+            <Path Data="M5,3.2 A3,3 0 0 1 11,3.2 L11,12.6 A5,5 0 1 1 5,12.6 Z" Stroke="#FFDB2777" StrokeThickness="1.6" StrokeLineJoin="Round" Fill="#1FDB2777"/>
+            <Rectangle Canvas.Left="7" Canvas.Top="7" Width="2" Height="9" RadiusX="1" RadiusY="1" Fill="#FFF472B6"/>
+            <Ellipse Canvas.Left="5.4" Canvas.Top="14" Width="5.2" Height="5.2" Fill="#FFF472B6"/>
+          </Canvas>
+          <TextBlock Text="{{title}}" Foreground="#FFF4F1F6" FontSize="16" FontWeight="SemiBold" Margin="10,0,0,1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-          <Border x:Name="MinBtn" Width="28" Height="28" CornerRadius="14" Background="#FF222632" Cursor="Hand" Margin="0,0,8,0" ToolTip="{{minTip}}">
-            <TextBlock Text="–" Foreground="#FFA0A6B8" FontSize="15" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-2,0,0"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+          <Border x:Name="MinBtn" Width="28" Height="28" CornerRadius="14" Cursor="Hand" Margin="0,0,6,0" ToolTip="{{minTip}}">
+            <Rectangle Width="10" Height="1.6" Fill="#FFC9C5D1" HorizontalAlignment="Center" VerticalAlignment="Center" RadiusX="0.8" RadiusY="0.8"/>
           </Border>
-          <Border x:Name="CloseBtn" Width="28" Height="28" CornerRadius="14" Background="#FF222632" Cursor="Hand" ToolTip="{{closeTip}}">
-            <TextBlock Text="✕" Foreground="#FFA0A6B8" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Border x:Name="CloseBtn" Width="28" Height="28" CornerRadius="14" Cursor="Hand" ToolTip="{{closeTip}}">
+            <Path Data="M0,0 L9,9 M9,0 L0,9" Stroke="#FFC9C5D1" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
         </StackPanel>
       </Grid>
-      <Border x:Name="Pill" HorizontalAlignment="Left" Margin="0,12,0,4" CornerRadius="11" Padding="12,4" Background="#2234D399">
-        <TextBlock x:Name="StatusText" Text="{{stOk}}" Foreground="#FF34D399" FontSize="13" FontWeight="SemiBold"/>
+      <!-- status pill: state dot + text, colours cross-fade -->
+      <Border x:Name="Pill" HorizontalAlignment="Left" Margin="0,14,0,0" CornerRadius="12" Padding="10,4,12,5" MinHeight="24">
+        <StackPanel Orientation="Horizontal">
+          <Ellipse x:Name="Dot" Width="8" Height="8" VerticalAlignment="Center" Margin="0,1,8,0"/>
+          <TextBlock x:Name="StatusText" Text="{{stWait}}" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="300"/>
+        </StackPanel>
       </Border>
-      <Grid Margin="0,10,0,0">
+      <!-- temperature rings -->
+      <Grid Margin="0,12,0,0">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" HorizontalAlignment="Center">
           <Grid x:Name="CpuRing" Background="Transparent" Width="150" Height="150" FlowDirection="LeftToRight">
-            <Path x:Name="CpuTrack" Stroke="#FF262A36" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-            <Path x:Name="CpuArc" Stroke="#34D399" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-            <Path x:Name="CpuFanTrack" Stroke="#FF1A1F2B" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="CpuTrack" Stroke="#FF2A2730" StrokeThickness="10" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="CpuArc" Stroke="#34D399" StrokeThickness="10" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="CpuFanTrack" Stroke="#FF211F27" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
             <Path x:Name="CpuFanArc" Stroke="#FF0EA5E9" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-              <TextBlock x:Name="CpuVal" Text="--°" Foreground="#FFF1F3F8" FontSize="34" FontWeight="Light" HorizontalAlignment="Center"/>
-              <TextBlock Text="CPU" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Center"/>
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,4,0,0">
+              <TextBlock x:Name="CpuVal" Text="--°" Foreground="#FFF4F1F6" FontSize="34" FontWeight="Light" HorizontalAlignment="Center" TextOptions.TextFormattingMode="Ideal" FontFamily="Segoe UI Variable Display, Segoe UI"/>
+              <TextBlock Text="CPU" Foreground="#FF8C8796" FontSize="11" HorizontalAlignment="Center" Margin="0,-2,0,0" FontFamily="Segoe UI"/>
             </StackPanel>
           </Grid>
-          <TextBlock Text="{{cpuTemp}}" Foreground="#FFC9CEDB" FontSize="13" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+          <TextBlock Text="{{cpuTemp}}" Foreground="#FFC9C5D1" FontSize="12.5" HorizontalAlignment="Center" Margin="0,0,0,0" TextTrimming="CharacterEllipsis" MaxWidth="160"/>
         </StackPanel>
         <StackPanel Grid.Column="1" HorizontalAlignment="Center">
           <Grid x:Name="GpuRing" Background="Transparent" Width="150" Height="150" FlowDirection="LeftToRight">
-            <Path x:Name="GpuTrack" Stroke="#FF262A36" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-            <Path x:Name="GpuArc" Stroke="#60A5FA" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-            <Path x:Name="GpuFanTrack" Stroke="#FF1A1F2B" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="GpuTrack" Stroke="#FF2A2730" StrokeThickness="10" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="GpuArc" Stroke="#60A5FA" StrokeThickness="10" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="GpuFanTrack" Stroke="#FF211F27" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
             <Path x:Name="GpuFanArc" Stroke="#FF0EA5E9" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-              <TextBlock x:Name="GpuVal" Text="--°" Foreground="#FFF1F3F8" FontSize="34" FontWeight="Light" HorizontalAlignment="Center"/>
-              <TextBlock x:Name="GpuSub" Text="GPU" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Center"/>
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,4,0,0">
+              <TextBlock x:Name="GpuVal" Text="--°" Foreground="#FFF4F1F6" FontSize="34" FontWeight="Light" HorizontalAlignment="Center" TextOptions.TextFormattingMode="Ideal" FontFamily="Segoe UI Variable Display, Segoe UI"/>
+              <TextBlock x:Name="GpuSub" Text="GPU" Foreground="#FF8C8796" FontSize="11" HorizontalAlignment="Center" Margin="0,-2,0,0"/>
             </StackPanel>
           </Grid>
-          <TextBlock Text="{{gpuTemp}}" Foreground="#FFC9CEDB" FontSize="13" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+          <TextBlock Text="{{gpuTemp}}" Foreground="#FFC9C5D1" FontSize="12.5" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="160"/>
         </StackPanel>
       </Grid>
-      <Border Margin="0,16,0,0" CornerRadius="14" Background="#FF1B1E27" Padding="14,10">
+      <!-- limits + fans -->
+      <Border Margin="0,16,0,0" CornerRadius="14" Background="#FF1E1C24" Padding="14,12,14,12">
         <StackPanel>
-          <Grid Margin="0,2">
-            <TextBlock Text="{{cpuMax}}" Foreground="#FF8A91A5" FontSize="13"/>
-            <TextBlock x:Name="MaxPct" Text="100" Foreground="#FFF1F3F8" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
-          </Grid>
-          <Grid Margin="0,6,0,2">
-            <TextBlock Text="{{gpuCtl}}" Foreground="#FF8A91A5" FontSize="13"/>
-            <TextBlock x:Name="GpuLimit" Text="—" Foreground="#FFF1F3F8" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right"/>
-          </Grid>
-          <Border Height="1" Background="#FF262A36" Margin="0,10,0,8"/>
           <Grid>
-            <TextBlock Text="{{fans}}" Foreground="#FF8A91A5" FontSize="13" VerticalAlignment="Center"/>
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-              <Border x:Name="GameBadge" Visibility="Collapsed" VerticalAlignment="Center" CornerRadius="9" Padding="10,2,10,3" Margin="0,0,6,0" Background="#338B5CF6">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock Text="{{cpuMax}}" Foreground="#FF8C8796" FontSize="12.5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+            <TextBlock Grid.Column="1" x:Name="MaxPct" Text="100" Foreground="#FFF4F1F6" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </Grid>
+          <Grid Margin="0,8,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock Text="{{gpuCtl}}" Foreground="#FF8C8796" FontSize="12.5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+            <TextBlock Grid.Column="1" x:Name="GpuLimit" Text="—" Foreground="#FFF4F1F6" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </Grid>
+          <Border Height="1" Background="#FF2B2731" Margin="0,12,0,10"/>
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock Text="{{fans}}" Foreground="#FF8C8796" FontSize="12.5" VerticalAlignment="Center"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+              <Border x:Name="GameBadge" Visibility="Collapsed" VerticalAlignment="Center" CornerRadius="10" Padding="9,2,9,3" Margin="0,0,6,0" Background="#338B5CF6">
                 <TextBlock x:Name="GameBadgeText" Text="{{gameMode}}" Foreground="#FFC4B5FD" FontSize="11.5" FontWeight="SemiBold"/>
               </Border>
-              <Border x:Name="FanBadge" VerticalAlignment="Center" CornerRadius="9" Padding="10,2,10,3" Background="#2660A5FA">
-              <TextBlock x:Name="FanBadgeText" Text="-" Foreground="#FF60A5FA" FontSize="11.5" FontWeight="SemiBold"/>
-            </Border>
+              <Border x:Name="FanBadge" VerticalAlignment="Center" CornerRadius="10" Padding="9,2,9,3" Background="#2660A5FA">
+                <TextBlock x:Name="FanBadgeText" Text="-" Foreground="#FF60A5FA" FontSize="11.5" FontWeight="SemiBold"/>
+              </Border>
             </StackPanel>
           </Grid>
-          <StackPanel Grid.IsSharedSizeScope="True" Margin="0,0,0,2">
-            <Grid x:Name="FanRow1" Margin="0,8,0,0" Background="Transparent">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="Auto" SharedSizeGroup="FanLbl"/><ColumnDefinition Width="*"/><ColumnDefinition Width="42"/></Grid.ColumnDefinitions>
-              <Canvas Grid.Column="0" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Center">
-                <Ellipse Width="18" Height="18" Fill="#FF20242F"/>
+          <StackPanel Grid.IsSharedSizeScope="True">
+            <Grid x:Name="FanRow1" Margin="0,10,0,0" Background="Transparent">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="26"/><ColumnDefinition Width="Auto" SharedSizeGroup="FanLbl"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+              <Canvas Grid.Column="0" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Center" FlowDirection="LeftToRight">
+                <Ellipse Width="18" Height="18" Fill="#FF26232D"/>
                 <Path x:Name="Fan1Icon" Fill="#FF34D399" Data="M9.00,7.20 C8.20,3.50 10.50,0.60 13.20,1.80 C14.60,3.20 12.40,6.40 10.40,8.20 Z M10.80,9.00 C14.50,8.20 17.40,10.50 16.20,13.20 C14.80,14.60 11.60,12.40 9.80,10.40 Z M9.00,10.80 C9.80,14.50 7.50,17.40 4.80,16.20 C3.40,14.80 5.60,11.60 7.60,9.80 Z M7.20,9.00 C3.50,9.80 0.60,7.50 1.80,4.80 C3.20,3.40 6.40,5.60 8.20,7.60 Z">
                   <Path.RenderTransform><RotateTransform CenterX="9" CenterY="9"/></Path.RenderTransform>
                 </Path>
-                <Ellipse Canvas.Left="6.5" Canvas.Top="6.5" Width="5" Height="5" Fill="#FF1B1E27" Stroke="#FF8A91A5" StrokeThickness="0.8"/>
+                <Ellipse Canvas.Left="6.5" Canvas.Top="6.5" Width="5" Height="5" Fill="#FF1E1C24" Stroke="#FF8C8796" StrokeThickness="0.8"/>
               </Canvas>
-              <TextBlock Grid.Column="1" Text="{{cpu}}" Foreground="#FFC9CEDB" FontSize="12.5" VerticalAlignment="Center" Margin="4,0,12,0"/>
-              <Grid Grid.Column="2" x:Name="Fan1Track" Height="8" VerticalAlignment="Center">
-                <Border CornerRadius="4" Background="#FF262A36"/>
-                <Border x:Name="Fan1Fill" CornerRadius="4" HorizontalAlignment="Left" Width="0" Background="#FF34D399"/>
+              <TextBlock Grid.Column="1" Text="{{cpu}}" Foreground="#FFC9C5D1" FontSize="12.5" VerticalAlignment="Center" Margin="2,0,12,0"/>
+              <Grid Grid.Column="2" x:Name="Fan1Track" Height="6" VerticalAlignment="Center">
+                <Border CornerRadius="3" Background="#FF2A2730"/>
+                <Border x:Name="Fan1Fill" CornerRadius="3" HorizontalAlignment="Left" Width="0" Background="#FF34D399"/>
               </Grid>
-              <TextBlock Grid.Column="3" x:Name="Fan1Pct" Text="" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-            </Grid>            <Grid x:Name="FanRow2" Margin="0,8,0,0" Background="Transparent">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="Auto" SharedSizeGroup="FanLbl"/><ColumnDefinition Width="*"/><ColumnDefinition Width="42"/></Grid.ColumnDefinitions>
-              <Canvas Grid.Column="0" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Center">
-                <Ellipse Width="18" Height="18" Fill="#FF20242F"/>
+              <TextBlock Grid.Column="3" x:Name="Fan1Pct" Text="" Foreground="#FF8C8796" FontSize="11.5" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>
+            <Grid x:Name="FanRow2" Margin="0,8,0,0" Background="Transparent">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="26"/><ColumnDefinition Width="Auto" SharedSizeGroup="FanLbl"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+              <Canvas Grid.Column="0" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Center" FlowDirection="LeftToRight">
+                <Ellipse Width="18" Height="18" Fill="#FF26232D"/>
                 <Path x:Name="Fan2Icon" Fill="#FF34D399" Data="M9.00,7.20 C8.20,3.50 10.50,0.60 13.20,1.80 C14.60,3.20 12.40,6.40 10.40,8.20 Z M10.80,9.00 C14.50,8.20 17.40,10.50 16.20,13.20 C14.80,14.60 11.60,12.40 9.80,10.40 Z M9.00,10.80 C9.80,14.50 7.50,17.40 4.80,16.20 C3.40,14.80 5.60,11.60 7.60,9.80 Z M7.20,9.00 C3.50,9.80 0.60,7.50 1.80,4.80 C3.20,3.40 6.40,5.60 8.20,7.60 Z">
                   <Path.RenderTransform><RotateTransform CenterX="9" CenterY="9"/></Path.RenderTransform>
                 </Path>
-                <Ellipse Canvas.Left="6.5" Canvas.Top="6.5" Width="5" Height="5" Fill="#FF1B1E27" Stroke="#FF8A91A5" StrokeThickness="0.8"/>
+                <Ellipse Canvas.Left="6.5" Canvas.Top="6.5" Width="5" Height="5" Fill="#FF1E1C24" Stroke="#FF8C8796" StrokeThickness="0.8"/>
               </Canvas>
-              <TextBlock Grid.Column="1" Text="{{gpu}}" Foreground="#FFC9CEDB" FontSize="12.5" VerticalAlignment="Center" Margin="4,0,12,0"/>
-              <Grid Grid.Column="2" x:Name="Fan2Track" Height="8" VerticalAlignment="Center">
-                <Border CornerRadius="4" Background="#FF262A36"/>
-                <Border x:Name="Fan2Fill" CornerRadius="4" HorizontalAlignment="Left" Width="0" Background="#FF34D399"/>
+              <TextBlock Grid.Column="1" Text="{{gpu}}" Foreground="#FFC9C5D1" FontSize="12.5" VerticalAlignment="Center" Margin="2,0,12,0"/>
+              <Grid Grid.Column="2" x:Name="Fan2Track" Height="6" VerticalAlignment="Center">
+                <Border CornerRadius="3" Background="#FF2A2730"/>
+                <Border x:Name="Fan2Fill" CornerRadius="3" HorizontalAlignment="Left" Width="0" Background="#FF34D399"/>
               </Grid>
-              <TextBlock Grid.Column="3" x:Name="Fan2Pct" Text="" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-            </Grid>          </StackPanel>
-
+              <TextBlock Grid.Column="3" x:Name="Fan2Pct" Text="" Foreground="#FF8C8796" FontSize="11.5" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>
+          </StackPanel>
         </StackPanel>
       </Border>
-      <Border x:Name="GraphBtn" Margin="0,12,0,0" CornerRadius="10" Background="#FF1B1E27" Padding="10,6" Cursor="Hand">
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-          <TextBlock x:Name="GraphChev" Text="&#x25BE;" Foreground="#FF8A91A5" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
-          <TextBlock x:Name="GraphBtnText" Text="{{showGraph}}" Foreground="#FFC9CEDB" FontSize="12.5" VerticalAlignment="Center"/>
+      <!-- graph toggle -->
+      <Border x:Name="GraphBtn" Margin="0,10,0,0" CornerRadius="12" Padding="12,7,12,8" Cursor="Hand" MinHeight="34">
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <Path x:Name="GraphChev" Data="M0,0 L4.5,4.5 L9,0" Stroke="#FFF472B6" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                Width="9" Height="5" VerticalAlignment="Center" Margin="0,1,8,0" RenderTransformOrigin="0.5,0.5">
+            <Path.RenderTransform><RotateTransform Angle="0"/></Path.RenderTransform>
+          </Path>
+          <TextBlock x:Name="GraphBtnText" Text="{{showGraph}}" Foreground="#FFC9C5D1" FontSize="12.5" VerticalAlignment="Center"/>
         </StackPanel>
       </Border>
       <Border x:Name="GraphWrap" Height="0" ClipToBounds="True">
         <StackPanel x:Name="GraphPanel" VerticalAlignment="Top">
-      <Grid Margin="0,14,0,6">
-        <TextBlock Text="{{last5}}" Foreground="#FF8A91A5" FontSize="12"/>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-          <Ellipse Width="8" Height="8" Fill="#FB923C" VerticalAlignment="Center"/>
-          <TextBlock Text="{{cpu}}" Foreground="#FF8A91A5" FontSize="12" Margin="5,0,12,0"/>
-          <Ellipse Width="8" Height="8" Fill="#60A5FA" VerticalAlignment="Center"/>
-          <TextBlock Text="{{gpu}}" Foreground="#FF8A91A5" FontSize="12" Margin="5,0,0,0"/>
-        </StackPanel>
-      </Grid>
-      <Border CornerRadius="14" Background="#FF1B1E27" Padding="8" FlowDirection="LeftToRight">
-        <Canvas x:Name="Graph" Height="90" ClipToBounds="True">
-          <Line x:Name="L100" Stroke="#66F43F5E" StrokeThickness="1" StrokeDashArray="4 3"/>
-          <Line x:Name="L90" Stroke="#44FBBF24" StrokeThickness="1" StrokeDashArray="2 4"/>
-          <TextBlock x:Name="T100" Text="100°" Foreground="#99F43F5E" FontSize="9"/>
-          <Path x:Name="ShadeBoost" Fill="#12FBBF24"/>
-          <Path x:Name="ShadeMax" Fill="#1CF43F5E"/>
-          <Path x:Name="BandBoost" Fill="#CCFBBF24"/>
-          <Path x:Name="BandMax" Fill="#DDF43F5E"/>
-          <Path x:Name="GameBand" Fill="#DD8B5CF6"/>
-          <TextBlock x:Name="TFan" Text="100%" Foreground="#992DD4BF" FontSize="9"/>
-          <Polyline x:Name="Fan2Line" Stroke="#C4B5FD" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
-          <Polyline x:Name="Fan1Line" Stroke="#2DD4BF" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
-          <Polyline x:Name="GpuLine" Stroke="#60A5FA" StrokeThickness="1.8" StrokeLineJoin="Round"/>
-          <Polyline x:Name="CpuLine" Stroke="#FB923C" StrokeThickness="1.8" StrokeLineJoin="Round"/>
-        </Canvas>
-      </Border>
-      <WrapPanel x:Name="FanLegend" HorizontalAlignment="Center" Margin="0,6,0,0">
-        <Line X1="0" Y1="0" X2="12" Y2="0" Stroke="#2DD4BF" StrokeThickness="1.6" StrokeDashArray="3 2" VerticalAlignment="Center"/>
-        <TextBlock Text="{{lgCpuFan}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
-        <Line X1="0" Y1="0" X2="12" Y2="0" Stroke="#C4B5FD" StrokeThickness="1.6" StrokeDashArray="3 2" VerticalAlignment="Center"/>
-        <TextBlock Text="{{lgGpuFan}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
-        <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#CCFBBF24" VerticalAlignment="Center"/>
-        <TextBlock Text="{{lgBoost}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
-        <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DDF43F5E" VerticalAlignment="Center"/>
-        <TextBlock Text="{{lgMax}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
-        <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DD8B5CF6" VerticalAlignment="Center"/>
-        <TextBlock Text="{{gameMode}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,0,0"/>
-      </WrapPanel>
+          <Grid Margin="2,12,2,6">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock Text="{{last5}}" Foreground="#FF8C8796" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+              <Ellipse Width="8" Height="8" Fill="#FB923C" VerticalAlignment="Center"/>
+              <TextBlock Text="{{cpu}}" Foreground="#FF8C8796" FontSize="12" Margin="5,0,12,0"/>
+              <Ellipse Width="8" Height="8" Fill="#60A5FA" VerticalAlignment="Center"/>
+              <TextBlock Text="{{gpu}}" Foreground="#FF8C8796" FontSize="12" Margin="5,0,0,0"/>
+            </StackPanel>
+          </Grid>
+          <Border CornerRadius="14" Background="#FF1E1C24" Padding="8" FlowDirection="LeftToRight">
+            <Canvas x:Name="Graph" Height="90" ClipToBounds="True">
+              <Line x:Name="L100" Stroke="#66F43F5E" StrokeThickness="1" StrokeDashArray="4 3"/>
+              <Line x:Name="L90" Stroke="#44FBBF24" StrokeThickness="1" StrokeDashArray="2 4"/>
+              <TextBlock x:Name="T100" Text="100°" Foreground="#99F43F5E" FontSize="9"/>
+              <Path x:Name="ShadeBoost" Fill="#12FBBF24"/>
+              <Path x:Name="ShadeMax" Fill="#1CF43F5E"/>
+              <Path x:Name="BandBoost" Fill="#CCFBBF24"/>
+              <Path x:Name="BandMax" Fill="#DDF43F5E"/>
+              <Path x:Name="GameBand" Fill="#DD8B5CF6"/>
+              <TextBlock x:Name="TFan" Text="100%" Foreground="#992DD4BF" FontSize="9"/>
+              <Polyline x:Name="Fan2Line" Stroke="#C4B5FD" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
+              <Polyline x:Name="Fan1Line" Stroke="#2DD4BF" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
+              <Polyline x:Name="GpuLine" Stroke="#60A5FA" StrokeThickness="1.8" StrokeLineJoin="Round"/>
+              <Polyline x:Name="CpuLine" Stroke="#FB923C" StrokeThickness="1.8" StrokeLineJoin="Round"/>
+            </Canvas>
+          </Border>
+          <WrapPanel x:Name="FanLegend" HorizontalAlignment="Center" Margin="0,8,0,2">
+            <StackPanel Orientation="Horizontal" Margin="0,2,8,2"><Line X1="0" Y1="0" X2="10" Y2="0" Stroke="#2DD4BF" StrokeThickness="1.6" StrokeDashArray="3 2" VerticalAlignment="Center"/><TextBlock Text="{{lgCpuFan}}" Foreground="#FF8C8796" FontSize="10.5" Margin="3,0,0,0"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,2,8,2"><Line X1="0" Y1="0" X2="10" Y2="0" Stroke="#C4B5FD" StrokeThickness="1.6" StrokeDashArray="3 2" VerticalAlignment="Center"/><TextBlock Text="{{lgGpuFan}}" Foreground="#FF8C8796" FontSize="10.5" Margin="3,0,0,0"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,2,8,2"><Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#CCFBBF24" VerticalAlignment="Center"/><TextBlock Text="{{lgBoost}}" Foreground="#FF8C8796" FontSize="10.5" Margin="3,0,0,0"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,2,8,2"><Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DDF43F5E" VerticalAlignment="Center"/><TextBlock Text="{{lgMax}}" Foreground="#FF8C8796" FontSize="10.5" Margin="3,0,0,0"/></StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,2,0,2"><Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DD8B5CF6" VerticalAlignment="Center"/><TextBlock Text="{{gameMode}}" Foreground="#FF8C8796" FontSize="10.5" Margin="3,0,0,0"/></StackPanel>
+          </WrapPanel>
         </StackPanel>
       </Border>
-      <Grid Margin="0,14,0,0">
+      <!-- start with Windows: logon trigger of the RosaThermalGuard task (starts hidden in the tray) -->
+      <Border x:Name="AutoRow" Margin="0,10,0,0" CornerRadius="12" Background="#FF1E1C24" Padding="14,8,12,8" Cursor="Hand" ToolTip="{{autoStartTip}}" MinHeight="36">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <TextBlock Text="{{autoStart}}" Foreground="#FFC9C5D1" FontSize="12.5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+          <Border Grid.Column="1" x:Name="AutoTrack" Width="34" Height="18" CornerRadius="9" Background="#FF2A2730" VerticalAlignment="Center">
+            <Ellipse x:Name="AutoKnob" Width="12" Height="12" Fill="#FF8C8796" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="3,0,0,0">
+              <Ellipse.RenderTransform><TranslateTransform/></Ellipse.RenderTransform>
+            </Ellipse>
+          </Border>
+        </Grid>
+      </Border>
+      <!-- actions -->
+      <Grid Margin="0,12,0,0">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
-        <Border x:Name="PauseBtn" Grid.Column="0" CornerRadius="12" Background="#FF232734" Padding="0,8" Cursor="Hand">
-          <TextBlock x:Name="PauseText" Text="{{pause15}}" Foreground="#FFE2E6EF" FontSize="13" HorizontalAlignment="Center"/>
+        <Border x:Name="PauseBtn" Grid.Column="0" CornerRadius="12" Padding="8,9,8,10" Cursor="Hand" MinHeight="38">
+          <TextBlock x:Name="PauseText" Text="{{pause15}}" Foreground="#FFF4F1F6" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </Border>
-        <Border x:Name="LogBtn" Grid.Column="2" CornerRadius="12" Background="#FF232734" Padding="0,8" Cursor="Hand">
-          <TextBlock Text="{{report}}" Foreground="#FFE2E6EF" FontSize="13" HorizontalAlignment="Center"/>
+        <Border x:Name="LogBtn" Grid.Column="2" CornerRadius="12" Padding="8,9,8,10" Cursor="Hand" MinHeight="38">
+          <TextBlock Text="{{report}}" Foreground="#FFF4F1F6" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </Border>
       </Grid>
       <StackPanel x:Name="LangBar" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0" FlowDirection="LeftToRight"/>
@@ -393,36 +498,44 @@ foreach ($p in $T.PSObject.Properties) { $xamlText = $xamlText.Replace('{{' + $p
 [xml]$xaml = $xamlText
 $script:window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $script:ui = @{}
-foreach ($n in 'GraphBtn','GraphChev','GraphBtnText','GraphWrap','GraphPanel','CpuRing','GpuRing','CpuFanTrack','CpuFanArc','GpuFanTrack','GpuFanArc','Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','ShadeBoost','ShadeMax','BandBoost','BandMax','GameBand','GameBadge','GameBadgeText','TFan','Fan1Line','Fan2Line','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
+foreach ($n in 'GraphBtn','GraphChev','GraphBtnText','GraphWrap','GraphPanel','CpuRing','GpuRing','CpuFanTrack','CpuFanArc','GpuFanTrack','GpuFanArc','Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','ShadeBoost','ShadeMax','BandBoost','BandMax','GameBand','GameBadge','GameBadgeText','TFan','Fan1Line','Fan2Line','PauseBtn','PauseText','LogBtn','LangBar','AutoRow','AutoTrack','AutoKnob') { $ui[$n] = $window.FindName($n) }
 
 $ui.CpuTrack.Data = Get-ArcGeometry 1; $ui.GpuTrack.Data = Get-ArcGeometry 1; $ui.CpuFanTrack.Data = Get-ArcGeometry 1 72; $ui.GpuFanTrack.Data = Get-ArcGeometry 1 72; $script:fanRingKey = @{ 1 = ""; 2 = "" }
 $window.Add_IsVisibleChanged({ if ($window.IsVisible) { $script:fanLast = $fanSw.Elapsed.TotalSeconds; $script:arcLast = $script:fanLast; $script:arc.Cp = $null; $script:arc.Gp = $null; $script:arc.Ck = ""; $script:arc.Gk = ""; $script:arc.Ct = $sync.Cpu; $script:arc.Gt = $sync.Gpu; try { Step-ArcAnim $script:arcLast } catch {}; $fanAnim.Start() } else { $fanAnim.Stop() } })
 
 $ui.GraphBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; Set-GraphOpen (-not $script:graphOpen) $true; Save-UserSettings @{ graphOpen = $script:graphOpen }; UiLog ("graph " + $(if ($script:graphOpen) { 'shown' } else { 'hidden' })) })
-$ui.GraphBtn.Add_MouseEnter({ $this.Background = Brush '#FF232734' }); $ui.GraphBtn.Add_MouseLeave({ $this.Background = Brush '#FF1B1E27' })
+# hover: every clickable surface lifts one step in the same palette (cross-faded); close warms to the rose
+foreach ($hb in @(@($ui.GraphBtn, '#FF1E1C24', '#FF272430'), @($ui.PauseBtn, '#FF24212B', '#FF2F2B38'), @($ui.LogBtn, '#FF24212B', '#FF2F2B38'), @($ui.MinBtn, '#FF24212B', '#FF332E3B'), @($ui.CloseBtn, '#FF24212B', '#FF5A1F3D'))) {
+  $br = New-Object Windows.Media.SolidColorBrush (Color $hb[1]); $hb[0].Background = $br; $hb[0].Tag = @($hb[1], $hb[2])
+  $hb[0].Add_MouseEnter({ Fade-Brush $this.Background $this.Tag[1] 140 }); $hb[0].Add_MouseLeave({ Fade-Brush $this.Background $this.Tag[0] 200 })
+}
+$script:stFg = New-Object Windows.Media.SolidColorBrush (Color '#FF4B5263'); $script:stBg = New-Object Windows.Media.SolidColorBrush (Color '#244B5263')
+$ui.Dot.Fill = $script:stFg; $ui.StatusText.Foreground = $script:stFg; $ui.Pill.Background = $script:stBg
 $window.Add_SizeChanged({ if ($window.IsVisible -and $window.WindowState -eq 'Normal') { $wa = [Windows.SystemParameters]::WorkArea; $window.Top = [Math]::Max($wa.Top, $wa.Bottom - $window.ActualHeight - 4) } })
 Set-GraphOpen $script:graphOpen $false
 $window.Add_Closing({ if (-not $script:allowClose) { $_.Cancel = $true; $window.Hide() } })
 $window.Add_MouseLeftButtonDown({ try { $window.DragMove() } catch {} })
 $ui.CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $window.Hide() })
 $ui.MinBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $window.Hide() })
-foreach ($btn in $ui.MinBtn, $ui.CloseBtn) {
-  $btn.Add_MouseEnter({ $this.Background = Brush '#FF2E3342' }); $btn.Add_MouseLeave({ $this.Background = Brush '#FF222632' })
-}
 # Win+Down / system minimize -> tray, never the taskbar
 $window.Add_StateChanged({ if ($window.WindowState -eq 'Minimized') { $window.Hide(); $window.WindowState = 'Normal'; UiLog 'minimized -> hidden to tray' } })
 $ui.LogBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; try { Show-Report '24h' } catch { UiLog "report failed: $($_.Exception.Message)"; Start-Process notepad.exe (Join-Path $Root 'guard.log') } })
 
 $ui.PauseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; Toggle-Pause })
 
+$ui.AutoRow.Add_MouseLeftButtonDown({ $_.Handled = $true; Toggle-AutoStart })
+$ui.AutoTrack.Background = New-Object Windows.Media.SolidColorBrush (Color '#FF2A2730'); $ui.AutoKnob.Fill = New-Object Windows.Media.SolidColorBrush (Color '#FF8C8796')
+Set-AutoUi $false
 foreach ($code in $LangNames.Keys) {
   $b = New-Object Windows.Controls.Border
-  $b.CornerRadius = New-Object Windows.CornerRadius 9; $b.Padding = New-Object Windows.Thickness(10, 3, 10, 4); $b.Margin = New-Object Windows.Thickness(3, 0, 3, 0)
-  $b.Cursor = [Windows.Input.Cursors]::Hand; $b.Tag = $code
-  $b.Background = $(if ($code -eq $lang) { Brush '#FF2E3342' } else { Brush '#00000000' })
+  $b.CornerRadius = New-Object Windows.CornerRadius 10; $b.Padding = New-Object Windows.Thickness(11, 3, 11, 4); $b.Margin = New-Object Windows.Thickness(2, 0, 2, 0)
+  $b.Cursor = [Windows.Input.Cursors]::Hand; $b.Tag = $code; $b.MinHeight = 24
+  $b.Background = $(if ($code -eq $lang) { Brush '#2EDB2777' } else { Brush '#00000000' })
+  $b.BorderThickness = New-Object Windows.Thickness 1; $b.BorderBrush = $(if ($code -eq $lang) { Brush '#66DB2777' } else { Brush '#00000000' })
+  if ($code -ne $lang) { $b.Add_MouseEnter({ $this.Background = Brush '#FF24212B' }); $b.Add_MouseLeave({ $this.Background = Brush '#00000000' }) }
   $tb = New-Object Windows.Controls.TextBlock
-  $tb.Text = $LangNames[$code]; $tb.FontSize = 12
-  $tb.Foreground = $(if ($code -eq $lang) { Brush '#FFF1F3F8' } else { Brush '#FF6B7285' })
+  $tb.Text = $LangNames[$code]; $tb.FontSize = 12; $tb.VerticalAlignment = 'Center'
+  $tb.Foreground = $(if ($code -eq $lang) { Brush '#FFFBCFE8' } else { Brush '#FF8C8796' })
   $tb.FontFamily = New-Object Windows.Media.FontFamily $(if ($code -eq 'zh-CN') { 'Microsoft YaHei UI, Segoe UI' } else { 'Segoe UI, Tahoma' })
   $b.Child = $tb
   $b.Add_MouseLeftButtonDown({ $_.Handled = $true; Switch-Language ([string]$this.Tag) })
@@ -453,7 +566,7 @@ function Step-FanAnim {
   }
 }
 $fanAnim = New-Object Windows.Threading.DispatcherTimer
-$fanAnim.Interval = [TimeSpan]::FromMilliseconds(40)   # 25 fps
+$fanAnim.Interval = [TimeSpan]::FromMilliseconds(33)   # ~30 fps, only while the window is visible
 $fanAnim.Add_Tick({ try { Step-FanAnim } catch {}; try { Step-ArcAnim $fanSw.Elapsed.TotalSeconds } catch {} })
 function Update-FanUi {
   $fs = $script:fanState
@@ -462,7 +575,7 @@ function Update-FanUi {
   $ok = [bool]$sync.FanOk -and [bool]$sync.FanMode
   if (-not $ok) {
     $fs.T1 = 0.0; $fs.T2 = 0.0
-    $ui.FanBadge.Background = Brush '#264B5263'; $ui.FanBadgeText.Foreground = Brush '#FF8A91A5'; $ui.FanBadgeText.Text = $T.fanNA
+    $ui.FanBadge.Background = Brush '#26585363'; $ui.FanBadgeText.Foreground = Brush '#FF8C8796'; $ui.FanBadgeText.Text = $T.fanNA
     foreach ($i in 1, 2) { $ui["Fan${i}Pct"].Text = ''; $ui["FanRow$i"].ToolTip = $null; $ui["Fan${i}Icon"].Fill = Brush '#FF4B5263' }
     foreach ($k in 'Cpu', 'Gpu') { $ui["${k}FanArc"].Visibility = 'Collapsed'; $ui["${k}FanTrack"].Visibility = 'Collapsed'; $ui["${k}Ring"].ToolTip = $null }
     return
@@ -550,6 +663,9 @@ function Exit-App {
     UiLog 'guard did not stop in time - running restore'
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File (Join-Path $AppDir 'ThermalGuard.ps1') -Restore
   }
+  $sync.SuiteStop = $true
+  $t1 = Get-Date
+  while ($script:suiteHandle -and -not $script:suiteHandle.IsCompleted -and ((Get-Date) - $t1).TotalSeconds -lt 4) { Start-Sleep -Milliseconds 100 }
   $notify.Visible = $false; $notify.Dispose()
   [Windows.Application]::Current.Shutdown()
 }
@@ -562,7 +678,7 @@ $notify.Text = 'Rosa Thermal Guard'
 $notify.Visible = $true
 
 # ---------- refresh loop ----------
-$script:snapPending = 0
+$script:snapPending = 0; $script:snapDpi = 192
 $script:lastHist = [datetime]::MinValue
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(1)
@@ -580,11 +696,12 @@ $timer.Add_Tick({
     if ($cpu -eq $null -and -not $sync.Updated) { $col = '#4B5263'; $st = $T.stWait }
 
     $txt = if ($cpu -ne $null) { [string][int][Math]::Round($cpu) } else { '…' }
-    if (($now - $script:lastTheme).TotalSeconds -ge 30) { $script:lightBar = Test-LightTaskbar; $script:iconSize = Get-TrayIconSize; $script:lastTheme = $now }
+    if (($now - $script:lastTheme).TotalSeconds -ge 5) { $script:lightBar = Test-LightTaskbar; $script:iconSize = Get-TrayIconSize; $script:lastTheme = $now }
     $ist = if ($cpu -eq $null -and -not $sync.Updated) { 'wait' } else { $state }
     $key = "$ist|$txt|$($script:lightBar)|$($script:iconSize)"
     if ($key -ne $script:lastIconKey) { Set-TrayIcon $TrayFill[$ist] $txt; $script:lastIconKey = $key }
     $tip = 'CPU {0}°C | GPU {1} | {2}' -f $(if ($cpu -ne $null) { [int]$cpu } else { '?' }), $(if ($gpu -ne $null) { "$([int]$gpu)°C" } else { '—' }), @{ok=$T.tipOk;cool=$T.tipCool;hot=$T.tipHot;pause=$T.tipPause}[$state]
+    if ($sync.GameMode) { $tip = "$tip | $($T.gameMode)" }   # Game Mode: tooltip + window only, no pill on the icon
     if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 63) }
     $notify.Text = $tip
     $miPause.Text = if ($sync.PauseUntil -gt $now) { $T.mResume } else { $T.mPause }
@@ -603,13 +720,11 @@ $timer.Add_Tick({
     }
 
     if ($window.IsVisible) {
-      $b = Brush $col
-      $ui.Dot.Fill = $b; $ui.StatusText.Text = $st; $ui.StatusText.Foreground = $b
-      $ui.Pill.Background = Brush ('#26' + $col.Substring(1))
-      $ui.CpuVal.Text = $(if ($cpu -ne $null) { "$([int][Math]::Round($cpu))°" } else { '--°' })
+      Fade-Brush $script:stFg $col; Fade-Brush $script:stBg ('#24' + $col.Substring(1)); $ui.StatusText.Text = $st
+      $ui.CpuVal.Text = $(if ($cpu -ne $null) { N "$([int][Math]::Round($cpu))°" } else { '--°' })
       $script:arc.Ct = $cpu   # the arc eases toward this (Step-ArcAnim), so a 1 s spike does not snap it to full
       if ($gpu -ne $null) {
-        $ui.GpuVal.Text = "$([int][Math]::Round($gpu))°"; $ui.GpuSub.Text = 'GPU'
+        $ui.GpuVal.Text = N "$([int][Math]::Round($gpu))°"; $ui.GpuSub.Text = 'GPU'
         $script:arc.Gt = $gpu
       } else {
         $ui.GpuVal.Text = '—'; $ui.GpuSub.Text = $T.igpu
@@ -627,9 +742,12 @@ $timer.Add_Tick({
       if ($script:graphOpen) { Update-Graph }   # collapsed: history keeps recording, nothing is drawn
     }
 
+    try { Poll-AutoJob } catch {}
+    $af = Join-Path $Root 'autostart.flag'   # 'on' / 'off' = the Start with Windows toggle
+    if ((Test-Path $af) -and -not $script:autoJob -and $script:autoOn -ne $null) { $c = ([string](Get-Content $af -Raw)).Trim(); Remove-Item $af -Force; if (($c -eq 'on') -ne [bool]$script:autoOn) { Toggle-AutoStart } }
     # flags from outside (no admin needed)
     if (Test-Path (Join-Path $Root 'show.flag')) { Remove-Item (Join-Path $Root 'show.flag') -Force; Show-Window 'show.flag' }
-    if (Test-Path (Join-Path $Root 'snap.flag')) { Remove-Item (Join-Path $Root 'snap.flag') -Force; Show-Window; $script:snapPending = 3 }
+    if (Test-Path (Join-Path $Root 'snap.flag')) { $sc = [string](Get-Content (Join-Path $Root 'snap.flag') -Raw); Remove-Item (Join-Path $Root 'snap.flag') -Force; $script:snapDpi = $(if ($sc -match '\b(96|120|144|192)\b') { [int]$matches[1] } else { 192 }); Show-Window; $script:snapPending = 3 }
     $gf = Join-Path $Root 'graph.flag'   # 'open' / 'close' expands or collapses the graph (same as the toggle button)
     if (Test-Path $gf) { $c = ([string](Get-Content $gf -Raw)).Trim(); Remove-Item $gf -Force; Set-GraphOpen ($c -eq 'open') $true; Save-UserSettings @{ graphOpen = $script:graphOpen }; UiLog ("graph " + $(if ($script:graphOpen) { 'shown' } else { 'hidden' }) + " (graph.flag)") }
     $rf = Join-Path $Root 'report.flag'   # 'report.flag' with e.g. '24h snap' opens the report (and saves report-<lang>.png)
@@ -638,10 +756,10 @@ $timer.Add_Tick({
       $script:snapPending--
       if ($script:snapPending -eq 0) {
         $el = $window.Content
-        $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap([int]($el.ActualWidth * 2 + 56), [int]($el.ActualHeight * 2 + 56), 192, 192, [Windows.Media.PixelFormats]::Pbgra32)
+        $k = $script:snapDpi / 96.0; $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap([int][Math]::Ceiling(($el.ActualWidth + 28) * $k), [int][Math]::Ceiling(($el.ActualHeight + 28) * $k), $script:snapDpi, $script:snapDpi, [Windows.Media.PixelFormats]::Pbgra32)
         $rtb.Render($el)
         $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder; $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($rtb))
-        $fs = [IO.File]::Create((Join-Path $Root "ui-$lang.png")); $enc.Save($fs); $fs.Close(); Copy-Item (Join-Path $Root "ui-$lang.png") (Join-Path $Root 'ui.png') -Force
+        $sn = $(if ($script:snapDpi -eq 192) { "ui-$lang.png" } else { "ui-$lang-$($script:snapDpi).png" }); $fs = [IO.File]::Create((Join-Path $Root $sn)); $enc.Save($fs); $fs.Close(); if ($script:snapDpi -eq 192) { Copy-Item (Join-Path $Root $sn) (Join-Path $Root 'ui.png') -Force }
         UiLog 'ui.png saved'
       }
     }
@@ -656,12 +774,18 @@ $timer.Add_Tick({
       UiLog "guard engine stopped ($errs) - restarting"
       $guardPs.Dispose(); Start-Guard
     }
+    # keep the suite worker alive (it ends on its own when the SDK is missing or switched off: then it stays off)
+    if ($script:suiteHandle -and $script:suiteHandle.IsCompleted -and -not $sync.Stop -and $sync.SuiteState -in @('error', 'stopped') -and ($now - $script:lastSuiteStart).TotalSeconds -gt 300) {
+      UiLog "suite worker ended ($($sync.SuiteState)) - starting it again"; try { $script:suitePs.Dispose() } catch {}; Start-Suite
+    }
   } catch { UiLog "tick error: $($_.Exception.Message)" }
 })
 
 $app = New-Object Windows.Application
 $app.ShutdownMode = 'OnExplicitShutdown'
 Start-Guard
+Start-Suite
+Start-AutoJob 'get'
 $timer.Start()
 UiLog 'tray app started'
 [void]$app.Run()

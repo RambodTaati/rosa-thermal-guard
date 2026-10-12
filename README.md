@@ -6,14 +6,20 @@ A small Windows tray app that keeps your **CPU and GPU below 100 °C**. When a c
 turns the fans up gently (GIGABYTE laptops), then slows work down step by step; when it cools off it
 gives you full speed back and hands the fans back to the firmware.
 
-![Rosa Thermal Guard](../../releases/download/v1.2.0/screenshot-en.png)
+![Rosa Thermal Guard](../../releases/download/v1.3.0/screenshot-en.png)
 
 ## Features
 - **Live monitoring**: CPU / GPU temperatures from LibreHardwareMonitor, two temperature rings (linear 0–100 °C) each wrapped by a thin fan-speed ring (% of that fan's max RPM, brighter while boosted, RPM in the tooltip), a fan row with
   spinning fan icons and speed bars, and a 5-minute graph with CPU/GPU temperatures, both fan speeds
   (% of each fan's max) and shaded bands for fan boost, 100 % and game mode.
-- **Tray icon** that shows the CPU temperature and changes color: green = normal, orange = cooling down,
-  red = hot, grey = paused. Left-click opens the window, right-click opens the menu.
+- **Tray icon** (Rosa Guard family design, from v1.3.0): a thermometer silhouette in Thermal Guard's rose color (#DB2777)
+  that holds the live CPU temperature as a white number. The thermometer is filled with the state color: green = normal,
+  orange = limiting / cooling down, red = hot, grey = paused; at 100 °C or more all three digits use the whole plate (never
+  "99+"). It is drawn at runtime for the taskbar monitor's DPI (16/20/24/32 px) with light- and dark-taskbar variants.
+  Game mode is shown in the tooltip and the window, not on the icon.
+  Left-click opens the window, right-click opens the menu.
+- **Rosa Guard suite** (from v1.3.0): publishes its thermal pressure to the other Rosa Guard apps, accepts cooldown
+  leases and wireless power-saving requests, and still runs fully standalone (see below). It always uses its own window.
 - **1-second polling** (`pollSeconds`). Every hold time, ramp, smoothing window and the spike filter is
   defined in seconds, so changing the poll rate does not change the behavior. The guard itself stays light
   (sensors are cached, fan RPM is read every poll, fan mode registers every 5 s, the temperature line is
@@ -57,7 +63,8 @@ gives you full speed back and hands the fans back to the firmware.
   re-read. Only vendor-supported calls are used (Windows power plan, `nvidia-smi`, GIGABYTE WMI).
 - **Pause** for 15 minutes from the tray (cancelled automatically if the CPU reaches 97 °C).
 - **4 languages**: English, فارسی, العربية, 简体中文 (auto-detected, switchable in the window; RTL for fa/ar).
-- **Starts with Windows** (scheduled task, elevated, no UAC prompt at each logon).
+- **Starts with Windows** (scheduled task, elevated, no UAC prompt at each logon), hidden in the tray: no window, no
+  focus change. Turn it off or on with **Start with Windows** in the window (on by default; the choice is kept on updates).
 - **Auto-update** (from v1.2.0): about once a day (and ~5 min after start) the guard asks GitHub for the latest
   release. A newer installer is downloaded over HTTPS from that release only, its SHA-256 must match the release's
   `SHA256SUMS.txt` (and GitHub's own digest), and its name, size and version resource must be those of this
@@ -94,8 +101,8 @@ gives you full speed back and hands the fans back to the firmware.
 - For fan control: a GIGABYTE laptop with its WMI interface (the GIGABYTE Control Center can stay installed)
 
 ## Install
-Download `RosaThermalGuard-Setup-1.2.0.exe` from the Releases page, check it against `SHA256SUMS.txt`
-(`Get-FileHash .\RosaThermalGuard-Setup-1.2.0.exe`), and run it.
+Download `RosaThermalGuard-Setup-1.3.0.exe` from the Releases page, check it against `SHA256SUMS.txt`
+(`Get-FileHash .\RosaThermalGuard-Setup-1.3.0.exe`), and run it.
 
 > The installer is **not code-signed**, so Windows SmartScreen may show "Windows protected your PC".
 > Click **More info → Run anyway** if you trust this release (verify the SHA-256 first).
@@ -109,6 +116,9 @@ Installing over an older version keeps your `config.json`.
 Settings → Apps → Rosa Thermal Guard → Uninstall. This stops the app, restores the original power, GPU and
 fan settings, removes the scheduled task and deletes the program and its data folder.
 
+The shared Rosa Guard component (`%CommonProgramFiles%\RosaGuard\TabHost`) is removed only when no other Rosa Guard app
+still uses it; uninstalling Thermal Guard just drops its own reference.
+
 ## How it works
 | | Throttle | Critical | Restore |
 |---|---|---|---|
@@ -121,6 +131,33 @@ Logs are in `%ProgramData%\RosaThermalGuard\guard.log`. At `logging.maxSizeMB` i
 `guard.1.log.gz`, `guard.2.log.gz` … (limited by `keepFiles`, `keepDays` and `totalMaxMB`); rotation is safe while the
 tray and the guard both write. The report data lives in `history\` (8 days of 5-second rows plus 7 days of events,
 about 0.7 MB per day).
+
+## Rosa Guard suite: IPC (from v1.3.0)
+Thermal Guard is the first app of the Rosa Guard suite (interop contract 1.1, Rosa Guard SDK 1.1.2) and the owner of the
+power plan, CPU limits, GPU clocks and fans. Suite apps talk only over local named pipes (limited to your account and
+SYSTEM, identities checked both ways); no app reads another app's files.
+
+- **Standalone first**: the installer adds the shared component `%CommonProgramFiles%\RosaGuard\TabHost\1.1.2`
+  (reference-counted). If it is missing or broken, Thermal Guard runs exactly like 1.2 (one log line:
+  `[SUITE] ... standalone`). All IPC runs in its own background runspace; the guard loop never waits for it.
+  Only its IPC part is used; Thermal Guard registers no tab.
+- **Publishes `thermal.pressure`** every 2 s (valid 15 s): `level` 0 = normal (CPU < 75 / GPU < 72 °C), 1 = warm or fans
+  ramping (game mode: from 65 / 60 °C), 2 = Thermal Guard is limiting the CPU or GPU, 3 = critical (CPU ≥ 95 / GPU ≥ 90 °C);
+  it steps down only after 30 s. Also `cpuC`, `gpuC`, `cpuTrendCPerSec`, `fanMode`, `gaming` and `cooldown`.
+- **Cooldown leases** (`thermal.request_cooldown`): another app (for example a downloader before a big job) can ask for
+  extra cooling for 10–600 s. `mild` = the fan curve starts 5 °C earlier (`suite.leaseFanShiftC`, same gentle ramp);
+  `strong` = also turbo off. A lease only adds cooling and never removes a protection step; at most 8 apps, one lease each,
+  and it ends at expiry, on cancel, or as soon as the requesting app disconnects. Off: `suite.allowPeerCooldown = false`.
+- **Wireless power saving** (`thermal.request_power_setting`): Net Guard can ask Thermal Guard, the power-plan owner, to set
+  the active plan's *Wireless Adapter Settings → Power Saving Mode* to Maximum Performance for 30–3600 s. The original
+  values are saved first (crash-safe, `wifistate.json`) and restored on expiry, cancel, disconnect, exit, crash and
+  uninstall; refused at pressure level 3 and revoked as soon as level 3 is reached; verified apps only; a renewal keeps
+  the same `leaseId`, and the `thermal.leases` query lists the active leases. Off: `suite.allowPowerSetting = false`.
+- **Gaming signal**: `suite.gaming` (from the elected detector) and `net.session.gaming` count as one more game-mode signal;
+  Thermal Guard's own detection keeps working on its own. When Thermal Guard is the elected detector it publishes
+  `suite.gaming` itself.
+- Diagnostics: lines with `[SUITE]` in `guard.log` show the hub link, leases and requests. Pipe
+  `RosaGuard.v1.thermal.<your SID>`, registration `HKLM\SOFTWARE\RosaGuard\Apps\thermal`.
 
 ## Configuration (`config.json` in the install folder, admin-only)
 Restart the app (tray menu → Exit, then start it again) after editing. Temperatures are °C, times are seconds,
@@ -186,6 +223,10 @@ fan values are % of full duty. Curves are lists of `[temperature, percent]` poin
 | `logging.keepDays` | 7 | archives older than this are deleted |
 | `logging.totalMaxMB` | 20 | cap for all logs together (oldest archives go first) |
 | `logging.tempsEverySec` | 5 | temperature line interval while something is active (idle: 60 s); events are always logged |
+| `suite.enabled` | true | join the Rosa Guard suite when the shared component is installed (false = always standalone) |
+| `suite.allowPeerCooldown` | true | accept cooldown leases from other Rosa Guard apps (they can only add cooling) |
+| `suite.allowPowerSetting` | true | accept wireless power-saving requests from Net Guard (restored on expiry/exit) |
+| `suite.leaseFanShiftC` | 5 | how many °C earlier the fan curve starts while a cooldown lease is active (0–10) |
 | `protectedProcesses` | system list | processes whose priority is never changed |
 
 ## Troubleshooting

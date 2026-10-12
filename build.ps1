@@ -24,6 +24,19 @@ $skip = 'Aga.Controls.dll', 'OxyPlot.dll', 'OxyPlot.WindowsForms.dll', 'Microsof
 Get-ChildItem $x -Filter *.dll | Where-Object { $skip -notcontains $_.Name } | Copy-Item -Destination $lib
 Get-ChildItem $lib | Unblock-File
 
+# 1b. Rosa Guard SDK (shared TabHost component): bundle the OFFICIAL prebuilt bin\ unmodified - every file must match bin\SHA256SUMS
+$sdk = Join-Path (Split-Path $root -Parent) 'RosaGuard-SDK'
+$sums = Join-Path $sdk 'bin\SHA256SUMS'
+if (-not (Test-Path $sums)) { throw "RosaGuard SDK bin\SHA256SUMS not found in $sdk" }
+foreach ($line in Get-Content $sums) {
+  if ($line -notmatch '^([0-9a-f]{64})\s+\*?(.+)$') { continue }
+  $f = Join-Path $sdk ('bin\' + $matches[2].Trim()); $want = $matches[1]
+  if (-not (Test-Path $f)) { throw "RosaGuard SDK: missing $f" }
+  $got = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+  if ($got -ne $want) { throw "RosaGuard SDK: $f does not match the official SHA256SUMS ($got)" }
+}
+Write-Host "RosaGuard SDK $((Get-Content (Join-Path $sdk 'bin\VERSION') -Raw).Trim()): official bin\ verified"
+
 # 2. compile
 if (-not $Iscc) {
   $Iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
