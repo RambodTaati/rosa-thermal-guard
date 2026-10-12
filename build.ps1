@@ -24,9 +24,9 @@ $skip = 'Aga.Controls.dll', 'OxyPlot.dll', 'OxyPlot.WindowsForms.dll', 'Microsof
 Get-ChildItem $x -Filter *.dll | Where-Object { $skip -notcontains $_.Name } | Copy-Item -Destination $lib
 Get-ChildItem $lib | Unblock-File
 
-# 1b. Rosa Guard SDK 1.2.0 (shared "SDK" component): bundle the OFFICIAL prebuilt bin\ unmodified - every file must match bin\SHA256SUMS.
+# 1b. Rosa Guard SDK 1.2.2 (shared "SDK" component): bundle the OFFICIAL prebuilt bin\ unmodified - every file must match bin\SHA256SUMS.
 #     Source: the official read-only release folder named by C:\Users\<you>\RosaGuard-SDK-LATEST.txt, else ..\RosaGuard-SDK
-$sdkVer = '1.2.0'; $sdk = $null
+$sdkVer = '1.2.2'; $sdk = $null
 $latest = Join-Path $env:USERPROFILE 'RosaGuard-SDK-LATEST.txt'
 if (Test-Path $latest) { $c = (Get-Content $latest | Select-Object -First 1).Trim(); if ($c -and (Test-Path (Join-Path $c 'bin\VERSION')) -and (Get-Content (Join-Path $c 'bin\VERSION') -Raw).Trim() -eq $sdkVer) { $sdk = $c } }
 if (-not $sdk) { $sdk = Join-Path (Split-Path $root -Parent) 'RosaGuard-SDK' }

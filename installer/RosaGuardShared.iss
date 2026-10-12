@@ -22,7 +22,7 @@
 ;      #define RG_ProcessImage    "NetGuard.exe"                           ; relative to {app}; or:
 ;      #define RG_ScriptPath      "NetGuard.ps1"                           ; for powershell-hosted apps
 ;      #define RG_RunsElevated    "1"                                      ; optional, default 0
-;      #define RG_SdkVersion      "1.2.0"
+;      #define RG_SdkVersion      "1.2.2"
 ;      #define RG_SdkSource       "..\..\RosaGuard-SDK"                    ; folder with RosaGuard.psd1/.psm1, bin, schemas, src
 ;      ; start with Windows (Contract 1.2 section 16), optional but required for Guard apps:
 ;      #define RG_StartupTaskName "NetGuard"                               ; -> task \RosaGuard\NetGuard
@@ -46,11 +46,11 @@
   #ifdef RG_TabHostVersion
     #define RG_SdkVersion RG_TabHostVersion
   #else
-    #define RG_SdkVersion "1.2.0"
+    #define RG_SdkVersion "1.2.2"
   #endif
 #endif
 #ifndef RG_SdkSource
-  #ifdef RG_SdkSource
+  #ifdef RG_TabHostSource
     #define RG_SdkSource RG_TabHostSource
   #endif
 #endif

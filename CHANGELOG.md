@@ -1,7 +1,10 @@
 # Changelog
 
 ## 1.3.1 (2026-10-12)
-Rosa Guard SDK 1.2.0. No change to protection, the window or the tray icon.
+Rosa Guard SDK 1.2.2 (local rebuild; first built with 1.2.0). No change to protection, the window or the tray icon.
+* **SDK 1.2.2 (Remote upgrade fix)**: right after Rosa Remote was upgraded, Thermal rejected it ("process image hash mismatch") until Thermal restarted, because the SDK
+  loaded the registered hashes once at startup. SDK 1.2.2 re-reads that peer's registration on a mismatch (at most every 2 s per app) and checks again; a real mismatch is still refused.
+  Thermal now requires the shared SDK component 1.2.2+ (installed to `%CommonProgramFiles%\RosaGuard\SDK\1.2.2`).
 * **SDK 1.2.0**: the bundled shared component is the official, unmodified 1.2.0 release (`bin\RosaGuard.Interop.dll` only, checked against
   `bin\SHA256SUMS` at build time and by the module at load time). It installs to `%CommonProgramFiles%\RosaGuard\SDK\1.2.0`.
 * **TabHost migration**: installing moves Thermal's 1.1.x reference from `RosaGuard\TabHost\1.1.2` to `RosaGuard\SDK\1.2.0`. The `TabHost`
