@@ -9,7 +9,8 @@ Add-Type -Language CSharp -TypeDefinition @'
 using System; using System.IO; using System.Text; using System.Globalization;
 public class RtgRep {
   static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
-  public int N; public double[] C, G, F1, F2; public bool[] Thr, Boost, Max, Game;
+  public int N; public double[] C, G, F1, F2; public bool[] Thr, Boost, Max, Game, Hot;
+  public double C100Sec, G100Sec, C100Long, G100Long; public int C100Ep, G100Ep;
   public double CMax = double.NaN, GMax = double.NaN, CAvg = double.NaN, GAvg = double.NaN;
   public double Above90, ThrSec, BoostSec, MaxSec, GameSec; public int Samples;
   static double P(string s) { double v; return (s.Length > 0 && double.TryParse(s, NumberStyles.Float, Inv, out v)) ? v : double.NaN; }
@@ -17,7 +18,8 @@ public class RtgRep {
   public static RtgRep Load(string dir, DateTime from, DateTime to, int n) {
     var r = new RtgRep(); r.N = n;
     r.C = new double[n]; r.G = new double[n]; r.F1 = new double[n]; r.F2 = new double[n];
-    r.Thr = new bool[n]; r.Boost = new bool[n]; r.Max = new bool[n]; r.Game = new bool[n];
+    r.Thr = new bool[n]; r.Boost = new bool[n]; r.Max = new bool[n]; r.Game = new bool[n]; r.Hot = new bool[n];
+    long lastCT = -100, lastGT = -100; double curC = 0, curG = 0;
     var cc = new int[n]; var gc = new int[n]; var fc = new int[n];
     long t0 = new DateTimeOffset(from).ToUnixTimeSeconds(), t1 = new DateTimeOffset(to).ToUnixTimeSeconds(); double span = Math.Max(1, t1 - t0);
     double cs = 0, gs = 0; int cn = 0, gn = 0;
@@ -44,6 +46,13 @@ public class RtgRep {
         if (fan >= 1) { r.Boost[i] = true; r.BoostSec += 5; }
         if (fan >= 2) { r.Max[i] = true; r.MaxSec += 5; }
         if (game) { r.Game[i] = true; r.GameSec += 5; }
+        // seconds at/above 100 C in this 5-s row (columns 12/13; older rows: one reading if the row max was >= 100)
+        double c1 = p.Length > 11 ? P(p[11]) : double.NaN, g1 = p.Length > 12 ? P(p[12]) : double.NaN;
+        if (double.IsNaN(c1)) c1 = (!double.IsNaN(cm) && cm >= 100) ? 1 : 0;
+        if (double.IsNaN(g1)) g1 = (!double.IsNaN(gm) && gm >= 100) ? 1 : 0;
+        if (c1 > 0) { r.C100Sec += c1; if (t - lastCT <= 6) curC += c1; else { r.C100Ep++; curC = c1; } lastCT = t; if (curC > r.C100Long) r.C100Long = curC; }
+        if (g1 > 0) { r.G100Sec += g1; if (t - lastGT <= 6) curG += g1; else { r.G100Ep++; curG = g1; } lastGT = t; if (curG > r.G100Long) r.G100Long = curG; }
+        if (c1 > 0 || g1 > 0) r.Hot[i] = true;
       }
     }
     for (int i = 0; i < n; i++) {
@@ -103,7 +112,7 @@ function Rep-Events([datetime]$from, [datetime]$to) {
 }
 $script:EvStyle = @{
   start = @('evStart', '#FF94A3B8'); stop = @('evStop', '#FF94A3B8'); resume = @('evResume', '#FF94A3B8'); update = @('evUpdate', '#FF60A5FA')
-  cpuHot = @('evCpuHot', '#FFF43F5E'); cpuFull = @('evCpuFull', '#FF34D399'); gpuHot = @('evGpuHot', '#FFF43F5E'); gpuCool = @('evGpuCool', '#FF34D399')
+  cpuHot = @('evCpuHot', '#FFF43F5E'); cpuFast = @('evCpuFast', '#FFF97316'); cpuFull = @('evCpuFull', '#FF34D399'); gpuHot = @('evGpuHot', '#FFF43F5E'); gpuCool = @('evGpuCool', '#FF34D399')
   fanTake = @('evFanTake', '#FF38BDF8'); fanCrit = @('evFanCrit', '#FFF59E0B'); fanRelease = @('evFanRelease', '#FF7DD3FC'); failsafe = @('evFailsafe', '#FFF59E0B')
   gameOn = @('evGameOn', '#FFA78BFA'); gameOff = @('evGameOff', '#FFA78BFA'); prio = @('evPrio', '#FFFBBF24')
 }
@@ -120,8 +129,8 @@ function Fill-Report([string]$range) {
   $u.PCpu.Data = & $geo ([RtgRep]::Line($d.C, $w, $h, $lo, $hi)); $u.PGpu.Data = & $geo ([RtgRep]::Line($d.G, $w, $h, $lo, $hi))
   $u.PF1.Data = & $geo ([RtgRep]::Line($d.F1, $w, $h, 0, 100)); $u.PF2.Data = & $geo ([RtgRep]::Line($d.F2, $w, $h, 0, 100))
   $u.BThr.Data = & $geo ([RtgRep]::Band($d.Thr, $w, 0, $h)); $u.BBoost.Data = & $geo ([RtgRep]::Band($d.Boost, $w, $h - 12, $h - 6)); $u.BMax.Data = & $geo ([RtgRep]::Band($d.Max, $w, $h - 12, $h - 6))
-  $u.BGame.Data = & $geo ([RtgRep]::Band($d.Game, $w, $h - 5, $h))
-  foreach ($g in @(@('G50', 50), @('G70', 70), @('G90', 90))) { $y = $h - ($g[1] - $lo) / ($hi - $lo) * $h; $u[$g[0]].Y1 = $y; $u[$g[0]].Y2 = $y; $u[$g[0]].X2 = $w; [Windows.Controls.Canvas]::SetTop($u["T$($g[1])"], $y - 15) }
+  $u.BGame.Data = & $geo ([RtgRep]::Band($d.Game, $w, $h - 5, $h)); $u.BHot.Data = & $geo ([RtgRep]::Band($d.Hot, $w, 0, 5))
+  foreach ($g in @(@('G50', 50), @('G70', 70), @('G90', 90), @('G100', 100))) { $y = $h - ($g[1] - $lo) / ($hi - $lo) * $h; $u[$g[0]].Y1 = $y; $u[$g[0]].Y2 = $y; $u[$g[0]].X2 = $w; [Windows.Controls.Canvas]::SetTop($u["T$($g[1])"], $y - 15) }
   # time axis
   $u.XAxis.Children.Clear()
   $fmt = if ($range -eq '7d') { 'MM/dd' } else { 'HH:mm' }
@@ -138,6 +147,10 @@ function Fill-Report([string]$range) {
   if ($games -eq 0 -and $d.GameSec -gt 0) { $games = 1 }
   $u.VCpuMax.Text = Rep-Deg $d.CMax; $u.VCpuAvg.Text = Rep-Deg $d.CAvg; $u.VGpuMax.Text = Rep-Deg $d.GMax; $u.VGpuAvg.Text = Rep-Deg $d.GAvg
   $u.VAbove.Text = Rep-Dur $d.Above90; $u.VThr.Text = N ([string]$thr); $u.VBoost.Text = Rep-Dur $d.BoostSec; $u.VGames.Text = N ([string]$games)
+  foreach ($q in @(@('VC100', $d.C100Sec, $d.C100Ep, $d.C100Long), @('VG100', $d.G100Sec, $d.G100Ep, $d.G100Long))) {
+    $u[$q[0]].Text = Rep-Dur $q[1]; $u[$q[0]].Foreground = Brush $(if ($q[1] -gt 0) { '#FFEF4444' } else { '#FF34D399' })
+    $u["$($q[0])s"].Text = $(if ($q[2] -gt 0) { N ($T.rp100Sub -f $q[2], (Rep-Dur $q[3])) } else { '' })
+  }
   $u.VAbove.Foreground = Brush $(if ($d.Above90 -gt 0) { '#FFFB7185' } else { '#FFF1F4FA' })
   foreach ($k in 'VCpuMax','VGpuMax') { $v = $(if ($k -eq 'VCpuMax') { $d.CMax } else { $d.GMax }); $u[$k].Foreground = Brush $(if ([double]::IsNaN($v)) { '#FFF1F4FA' } elseif ($v -ge 90) { '#FFFB7185' } elseif ($v -ge 75) { '#FFFBBF24' } else { '#FF34D399' }) }
   $u.Events.Children.Clear()
@@ -191,6 +204,8 @@ $x = @'
               <Path x:Name="BThr" Fill="#1CF43F5E"/>
               <Line x:Name="G50" Stroke="#FF262A36" StrokeThickness="1"/><Line x:Name="G70" Stroke="#FF262A36" StrokeThickness="1"/>
               <Line x:Name="G90" Stroke="#66F43F5E" StrokeThickness="1" StrokeDashArray="4 3"/>
+              <Line x:Name="G100" Stroke="#B3EF4444" StrokeThickness="1"/>
+              <TextBlock x:Name="T100" Text="100°" Foreground="#FFEF4444" FontSize="10.5" Canvas.Left="2"/>
               <TextBlock x:Name="T50" Text="50°" Foreground="#FF5B6375" FontSize="10.5" Canvas.Left="2"/>
               <TextBlock x:Name="T70" Text="70°" Foreground="#FF5B6375" FontSize="10.5" Canvas.Left="2"/>
               <TextBlock x:Name="T90" Text="90°" Foreground="#FFB4536A" FontSize="10.5" Canvas.Left="2"/>
@@ -198,7 +213,7 @@ $x = @'
               <Path x:Name="PF2" Stroke="#B32DD4BF" StrokeThickness="1.3" StrokeDashArray="3 2"/>
               <Path x:Name="PGpu" Stroke="#FF34D399" StrokeThickness="1.8" StrokeLineJoin="Round"/>
               <Path x:Name="PCpu" Stroke="#FFFBBF24" StrokeThickness="1.8" StrokeLineJoin="Round"/>
-              <Path x:Name="BBoost" Fill="#FF0EA5E9"/><Path x:Name="BMax" Fill="#FFF59E0B"/><Path x:Name="BGame" Fill="#FF8B5CF6"/>
+              <Path x:Name="BHot" Fill="#FFEF4444"/><Path x:Name="BBoost" Fill="#FF0EA5E9"/><Path x:Name="BMax" Fill="#FFF59E0B"/><Path x:Name="BGame" Fill="#FF8B5CF6"/>
             </Canvas>
             <TextBlock x:Name="NoData" Text="{{rpNoData}}" Foreground="#FF6B7385" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
             <TextBlock x:Name="TFan100" Text="100%" Foreground="#FF4B7A94" FontSize="10" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,2,0"/>
@@ -213,6 +228,7 @@ $x = @'
         <Rectangle Width="14" Height="2" Fill="#FF38BDF8" VerticalAlignment="Center"/><TextBlock Text="{{lgCpuFan}}"/>
         <Rectangle Width="14" Height="2" Fill="#FF2DD4BF" VerticalAlignment="Center"/><TextBlock Text="{{lgGpuFan}}"/>
         <Rectangle Width="12" Height="10" Fill="#55F43F5E" VerticalAlignment="Center"/><TextBlock Text="{{lgThrottle}}"/>
+        <Rectangle Width="12" Height="5" Fill="#FFEF4444" VerticalAlignment="Center"/><TextBlock Text="{{lgOver100}}"/>
         <Rectangle Width="12" Height="5" Fill="#FF0EA5E9" VerticalAlignment="Center"/><TextBlock Text="{{lgBoost}}"/>
         <Rectangle Width="12" Height="5" Fill="#FFF59E0B" VerticalAlignment="Center"/><TextBlock Text="{{lgMax}}"/>
         <Rectangle Width="12" Height="5" Fill="#FF8B5CF6" VerticalAlignment="Center"/><TextBlock Text="{{gameMode}}"/>
@@ -230,6 +246,17 @@ $x = @'
         <Border><StackPanel><TextBlock Text="{{rpBoost}}" Foreground="#FF8A93A6" FontSize="11.5"/><TextBlock x:Name="VBoost" Foreground="#FF7DD3FC" FontSize="22" FontWeight="SemiBold" Margin="0,2,0,0"/></StackPanel></Border>
         <Border><StackPanel><TextBlock Text="{{rpGames}}" Foreground="#FF8A93A6" FontSize="11.5"/><TextBlock x:Name="VGames" Foreground="#FFC4B5FD" FontSize="22" FontWeight="SemiBold" Margin="0,2,0,0"/></StackPanel></Border>
       </UniformGrid>
+      <UniformGrid Columns="2" Margin="-4,0,-4,0">
+        <UniformGrid.Resources>
+          <Style TargetType="Border"><Setter Property="Background" Value="#FF1B1E27"/><Setter Property="CornerRadius" Value="12"/><Setter Property="Padding" Value="14,10"/><Setter Property="Margin" Value="4"/></Style>
+        </UniformGrid.Resources>
+        <Border><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel><TextBlock Text="{{rpCpu100}}" Foreground="#FF8A93A6" FontSize="11.5"/><TextBlock x:Name="VC100" Foreground="#FFF1F4FA" FontSize="22" FontWeight="SemiBold" Margin="0,2,0,0"/></StackPanel>
+          <TextBlock x:Name="VC100s" Grid.Column="1" Foreground="#FF8A93A6" FontSize="11.5" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="10,0,0,4" TextWrapping="Wrap" TextAlignment="Right"/></Grid></Border>
+        <Border><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel><TextBlock Text="{{rpGpu100}}" Foreground="#FF8A93A6" FontSize="11.5"/><TextBlock x:Name="VG100" Foreground="#FFF1F4FA" FontSize="22" FontWeight="SemiBold" Margin="0,2,0,0"/></StackPanel>
+          <TextBlock x:Name="VG100s" Grid.Column="1" Foreground="#FF8A93A6" FontSize="11.5" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="10,0,0,4" TextWrapping="Wrap" TextAlignment="Right"/></Grid></Border>
+      </UniformGrid>
       <TextBlock Text="{{rpEvents}}" Foreground="#FFF1F4FA" FontSize="14" FontWeight="SemiBold" Margin="2,12,0,6"/>
       <Border CornerRadius="12" Background="#FF1B1E27" Padding="14,8">
         <ScrollViewer MaxHeight="170" VerticalScrollBarVisibility="Hidden" PanningMode="VerticalOnly"><StackPanel x:Name="Events"/></ScrollViewer>
@@ -245,8 +272,8 @@ $x = @'
   foreach ($p in $T.PSObject.Properties) { $x = $x.Replace('{{' + $p.Name + '}}', [Security.SecurityElement]::Escape([string]$p.Value)) }
   $win = [Windows.Markup.XamlReader]::Parse($x)
   $u = @{}
-  foreach ($k in 'R1h','R24h','R7d','XBtn','Chart','BThr','G50','G70','G90','T50','T70','T90','PF1','PF2','PGpu','PCpu','BBoost','BMax','BGame','NoData','XAxis','VCpuMax','VCpuAvg','VGpuMax','VGpuAvg','VAbove','VThr','VBoost','VGames','Events','RawLog','TFan100') { $u[$k] = $win.FindName($k) }
-  foreach ($k in 'T50','T70','T90','TFan100') { $u[$k].Text = N $u[$k].Text }
+  foreach ($k in 'R1h','R24h','R7d','XBtn','Chart','BThr','G50','G70','G90','T50','T70','T90','PF1','PF2','PGpu','PCpu','BBoost','BMax','BGame','NoData','XAxis','VCpuMax','VCpuAvg','VGpuMax','VGpuAvg','VAbove','VThr','VBoost','VGames','Events','RawLog','TFan100','G100','T100','BHot','VC100','VC100s','VG100','VG100s') { $u[$k] = $win.FindName($k) }
+  foreach ($k in 'T50','T70','T90','T100','TFan100') { $u[$k].Text = N $u[$k].Text }
   if ($Hidden) {
     # render straight to a PNG without ever showing a window (no focus change, safe while a game is in front)
     $prev = $script:rep; $script:rep = @{ Win = $win; Ui = $u; Lang = $lang; Range = $range; LoadMs = 0 }

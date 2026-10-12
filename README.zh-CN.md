@@ -16,6 +16,11 @@
 - **CPU 降频**：通过 Windows 电源计划（“最大处理器状态”，所有核心类型，交流和电池）：100 → 99（关闭睿频）→ 85 → 70 → 55%，每次一级。
 - **NVIDIA GPU 降频**：驱动允许时用功耗上限（`nvidia-smi -pl`），否则用频率上限（`nvidia-smi -lgc`）75 → 55 → 40%，否则降低进程优先级。
 - **尖峰过滤**：高温需持续约 2 秒（`triggerSeconds`）才降一级，持续约 4 秒（`criticalSeconds`）风扇才到 100%。单次睿频尖峰会被忽略。
+- **尖峰防护**：满睿频时 CPU 可能在一次 1 秒读数内从 80 多度跳到 100-105 °C，比 2 秒过滤更快。一次读数达到 95 °C
+  （`spikeGuard.fastC`），或在 92 °C 以上每秒升温至少 5 °C，就会立即关闭睿频（99 % 档），并在 120 秒内没有此类读数后
+  才恢复（游戏模式下 300 秒）；若睿频恢复后
+  立即再次出现尖峰，该时长加倍，最多 600 秒（`cpu.maxTurboHoldSeconds`）。更深的档位仍需持续高温，游戏优先级保持不变。CPU 风扇曲线在 92 °C 时达到 88 %（100 %
+  仍只在 95 °C）。报告显示 CPU/GPU 高于 100 °C 的时长（总计、次数、最长一次），并在图表上用红色标出。
 - **顾及轴承寿命的风扇控制（技嘉笔记本）**，通过技嘉自己的 ACPI-WMI 接口（Control Center 使用的同一接口）：
   - 由厂商自动模式负责，直到平滑曲线需要比自动模式更多的风量（曲线从 CPU 75 °C / GPU 72 °C 开始，只在接近降频点时才到高转速）。
   - 从当前转速接管，每 2 秒以 2% 的小步调整，绝不跳变。
@@ -104,12 +109,17 @@
 | `cpu.minSecondsBetweenSteps` | 6 | 两次降频之间的最短间隔（CPU 和 GPU） |
 | `cpu.maxTurboHoldSeconds` | 600 | 反复过热后重新允许睿频前的最长等待 |
 | `cpu.triggerSeconds` | 2 | 尖峰过滤：高温需持续这么久 |
+| `spikeGuard.enabled` | true | 第一次出现过热或快速升温读数时关闭睿频 |
+| `spikeGuard.fastC` | 95 | 一次读数达到此温度即立即关闭睿频 |
+| `spikeGuard.riseFromC` / `risePerSec` | 92 / 5 | ……或在 `riseFromC` 以上每秒升温至少 `risePerSec` °C |
+| `spikeGuard.holdSeconds` | 120 | 在这段时间内没有此类读数后才恢复睿频 |
+| `spikeGuard.gameHoldSeconds` | 300 | 游戏模式下的同一时长 |
 | `gpu.throttleC` | 88 | GPU 达到该温度时开始第一级 |
 | `gpu.restoreC` | 78 | 低于此温度视为 GPU 已降温 |
 | `gpu.clockStepsPercent` | [75,55,40] | 功耗上限被锁定时的频率上限各级 |
 | `gpu.triggerSeconds` | 2 | GPU 的尖峰过滤 |
 | `fanBoost.enabled` | true | 风扇控制开关（无技嘉接口的硬件上忽略） |
-| `fanBoost.curveCpu` | [[75,50],[80,58],[85,68],[90,80],[94,90]] | 按 CPU 温度的风扇需求曲线 |
+| `fanBoost.curveCpu` | [[75,50],[80,60],[85,72],[89,82],[92,88]] | 按 CPU 温度的风扇需求曲线 |
 | `fanBoost.curveGpu` | [[72,50],[76,57],[80,65],[84,74],[88,84]] | 按 GPU 温度的风扇需求曲线 |
 | `fanBoost.fullDutyCpuC` / `fullDutyGpuC` | 95 / 90 | 临界：立即 100%，不做渐变 |
 | `fanBoost.criticalSeconds` | 4 | 原始临界温度需持续这么久（或平滑值已达临界） |
@@ -132,7 +142,7 @@
 | `fanBoost.gameMode.detectFullscreen` | true | 前台全屏程序 + GPU 繁忙 = 游戏 |
 | `fanBoost.gameMode.protectGame` | true | 永不降低游戏优先级 |
 | `fanBoost.gameMode.rampUpStepPercent` | 3 | 游戏时更快的升速渐变 |
-| `fanBoost.gameMode.curveCpu` | [[65,45],[71,54],[77,65],[83,77],[89,86],[93,90]] | 游戏曲线（CPU） |
+| `fanBoost.gameMode.curveCpu` | [[65,45],[71,55],[77,67],[83,78],[88,86],[91,90]] | 游戏曲线（CPU） |
 | `fanBoost.gameMode.curveGpu` | [[60,45],[66,54],[72,64],[78,74],[83,82],[87,88]] | 游戏曲线（GPU） |
 | `fanBoost.gameMode.exeList` | … | 始终视为游戏的进程名（不含 .exe，常见游戏） |
 | `fanBoost.gameMode.excludeExes` | … | 永远不算游戏的全屏程序（浏览器、播放器等） |

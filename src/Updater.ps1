@@ -22,7 +22,7 @@ $AllowedHosts = '^(github\.com|api\.github\.com|objects\.githubusercontent\.com|
 
 function Log([string]$m) {
   $line = '{0} update: {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m
-  for ($i = 0; $i -lt 10; $i++) { try { Add-Content -Path (Join-Path $Data 'guard.log') -Value $line -Encoding UTF8 -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 150 } }
+  $b = [Text.Encoding]::UTF8.GetBytes($line + "`r`n"); for ($i = 0; $i -lt 10; $i++) { try { $fs = New-Object IO.FileStream((Join-Path $Data 'guard.log'), [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData, [IO.FileShare]'ReadWrite, Delete', 4096, [IO.FileOptions]::None); try { $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }; break } catch { Start-Sleep -Milliseconds 100 } }
 }
 function Status([string]$r, [string]$latest, [string]$msg) {
   try { @{ at = (Get-Date).ToString('s'); result = $r; current = $script:cur; latest = $latest; manual = [bool]$Manual; message = $msg } | ConvertTo-Json | Set-Content $StatusFile -Encoding UTF8 } catch {}

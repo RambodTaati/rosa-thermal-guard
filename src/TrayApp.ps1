@@ -1,7 +1,7 @@
 ﻿<#  Rosa Thermal Guard - tray app (MIT License)
     One hidden PowerShell process: the guard engine (ThermalGuard.ps1) runs in a background runspace,
     the UI is a tray icon (green / orange / red) plus a compact dark WPF window (English or Persian).
-    Flag files in %ProgramData%\RosaThermalGuard: show.flag opens the window, snap.flag saves ui.png, report.flag opens the report window,
+    Flag files in %ProgramData%\RosaThermalGuard: show.flag opens the window, snap.flag saves ui.png, report.flag opens the report window, graph.flag (open/close) toggles the graph,
     minimize.flag minimizes it, stop.flag exits cleanly (settings restored). #>
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
@@ -9,7 +9,7 @@ $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Join-Path $env:ProgramData 'RosaThermalGuard'
 if (-not (Test-Path $Root)) { New-Item -ItemType Directory $Root -Force | Out-Null }
 $Inv = [Globalization.CultureInfo]::InvariantCulture
-function UiLog([string]$m) { $line = "{0} [UI] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m; for ($i = 0; $i -lt 4; $i++) { try { Add-Content (Join-Path $Root 'guard.log') $line -Encoding UTF8 -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 40 } } }
+function UiLog([string]$m) { $line = "{0} [UI] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m; $b = [Text.Encoding]::UTF8.GetBytes($line + "`r`n"); for ($i = 0; $i -lt 6; $i++) { try { $fs = New-Object IO.FileStream((Join-Path $Root 'guard.log'), [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData, [IO.FileShare]'ReadWrite, Delete', 4096, [IO.FileOptions]::None); try { $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }; break } catch { Start-Sleep -Milliseconds 30 } } }   # shared append: never locks out the guard
 
 $uiMutex = New-Object Threading.Mutex($false, 'Global\RosaThermalGuardUI')
 if (-not $uiMutex.WaitOne(0)) { exit 0 }
@@ -630,6 +630,8 @@ $timer.Add_Tick({
     # flags from outside (no admin needed)
     if (Test-Path (Join-Path $Root 'show.flag')) { Remove-Item (Join-Path $Root 'show.flag') -Force; Show-Window 'show.flag' }
     if (Test-Path (Join-Path $Root 'snap.flag')) { Remove-Item (Join-Path $Root 'snap.flag') -Force; Show-Window; $script:snapPending = 3 }
+    $gf = Join-Path $Root 'graph.flag'   # 'open' / 'close' expands or collapses the graph (same as the toggle button)
+    if (Test-Path $gf) { $c = ([string](Get-Content $gf -Raw)).Trim(); Remove-Item $gf -Force; Set-GraphOpen ($c -eq 'open') $true; Save-UserSettings @{ graphOpen = $script:graphOpen }; UiLog ("graph " + $(if ($script:graphOpen) { 'shown' } else { 'hidden' }) + " (graph.flag)") }
     $rf = Join-Path $Root 'report.flag'   # 'report.flag' with e.g. '24h snap' opens the report (and saves report-<lang>.png)
     if (Test-Path $rf) { $c = ([string](Get-Content $rf -Raw)).Trim(); Remove-Item $rf -Force; $rg = if ($c -match '(1h|24h|7d)') { $matches[1] } else { '24h' }; try { if ($c -match 'snap') { Show-Report $rg (Join-Path $Root "report-$lang.png") -Hidden } else { Show-Report $rg } } catch { UiLog "report failed: $($_.Exception.Message)" } }
     if ($script:snapPending -gt 0) {

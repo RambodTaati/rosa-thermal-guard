@@ -27,9 +27,10 @@
     ],
     "triggerSeconds": 2
   },
+  "spikeGuard": { "enabled": true, "fastC": 95, "riseFromC": 92, "risePerSec": 5, "holdSeconds": 120, "gameHoldSeconds": 300 },
   "fanBoost": {
     "enabled": true,
-    "curveCpu": [[75, 50], [80, 58], [85, 68], [90, 80], [94, 90]],
+    "curveCpu": [[75, 50], [80, 60], [85, 72], [89, 82], [92, 88]],
     "curveGpu": [[72, 50], [76, 57], [80, 65], [84, 74], [88, 84]],
     "fullDutyCpuC": 95,
     "fullDutyGpuC": 90,
@@ -55,7 +56,7 @@
       "detectFullscreen": true,
       "protectGame": true,
       "rampUpStepPercent": 3,
-      "curveCpu": [[65, 45], [71, 54], [77, 65], [83, 77], [89, 86], [93, 90]],
+      "curveCpu": [[65, 45], [71, 55], [77, 67], [83, 78], [88, 86], [91, 90]],
       "curveGpu": [[60, 45], [66, 54], [72, 64], [78, 74], [83, 82], [87, 88]],
       "exeList": ["cs2", "VALORANT-Win64-Shipping", "FortniteClient-Win64-Shipping", "r5apex", "eldenring", "Cyberpunk2077", "GTA5", "GTA5_Enhanced", "RDR2", "bg3", "bg3_dx11", "FC25", "FC26", "bf2042", "Overwatch", "dota2", "League of Legends", "RocketLeague", "Starfield", "witcher3", "helldivers2", "Minecraft.Windows"],
       "excludeExes": ["explorer", "ShellExperienceHost", "StartMenuExperienceHost", "SearchHost", "LockApp", "TextInputHost", "ApplicationFrameHost", "msedge", "chrome", "firefox", "brave", "opera", "vlc", "mpc-hc64", "PotPlayerMini64", "ms-teams", "Teams", "Zoom", "POWERPNT"]

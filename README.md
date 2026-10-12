@@ -24,6 +24,13 @@ gives you full speed back and hands the fans back to the firmware.
   clock cap (`nvidia-smi -lgc`) 75 → 55 → 40 %, otherwise lower process priority.
 - **Spike filter**: heat must last ~2 s (`triggerSeconds`) before a throttle step, and ~4 s
   (`criticalSeconds`) before the fans go to 100 %. Single-sample turbo spikes are ignored.
+- **Spike guard**: at full turbo the CPU can jump from the 80s to 100-105 °C within one 1-s reading, faster than the
+  2-s filter. One reading at/above 95 °C (`spikeGuard.fastC`), or a rise of at least 5 °C/s above 92 °C, turns turbo off
+  at once (the 99 % step), and turbo stays off until there has been no such reading for 120 s (300 s in game mode);
+  if a spike follows right after turbo returns, that hold doubles, up to 600 s (`cpu.maxTurboHoldSeconds`).
+  Deeper steps still need sustained heat, and the game keeps its priority. The CPU fan curve reaches 88 % by 92 °C
+  (100 % still only at 95 °C). The report shows CPU/GPU time above 100 °C (total, episodes, longest) and marks those
+  moments in red on the chart.
 - **Bearing-friendly fan control (GIGABYTE laptops)**, through GIGABYTE's own ACPI-WMI interface
   (the same one the Control Center uses):
   - The firmware's auto mode stays in charge until a smooth curve asks for more airflow than auto gives
@@ -131,12 +138,17 @@ fan values are % of full duty. Curves are lists of `[temperature, percent]` poin
 | `cpu.minSecondsBetweenSteps` | 6 | minimum time between two throttle steps (CPU and GPU) |
 | `cpu.maxTurboHoldSeconds` | 600 | longest wait before turbo is allowed again after repeated heat |
 | `cpu.triggerSeconds` | 2 | spike filter: heat must last this long before a CPU step |
+| `spikeGuard.enabled` | true | turn turbo off on the first very hot or fast-rising reading |
+| `spikeGuard.fastC` | 95 | one reading at/above this turns turbo off at once |
+| `spikeGuard.riseFromC` / `risePerSec` | 92 / 5 | ... or a rise of at least `risePerSec` °C/s above `riseFromC` |
+| `spikeGuard.holdSeconds` | 120 | turbo stays off until there has been no such reading for this long |
+| `spikeGuard.gameHoldSeconds` | 300 | the same hold while game mode is on |
 | `gpu.throttleC` | 88 | first GPU step at/above this |
 | `gpu.restoreC` | 78 | GPU counts as cool below this |
 | `gpu.clockStepsPercent` | [75,55,40] | clock cap steps (% of max clock) when the power limit is locked |
 | `gpu.triggerSeconds` | 2 | spike filter for the GPU |
 | `fanBoost.enabled` | true | fan control on/off (ignored on hardware without the GIGABYTE interface) |
-| `fanBoost.curveCpu` | [[75,50],[80,58],[85,68],[90,80],[94,90]] | fan demand from the CPU temperature |
+| `fanBoost.curveCpu` | [[75,50],[80,60],[85,72],[89,82],[92,88]] | fan demand from the CPU temperature |
 | `fanBoost.curveGpu` | [[72,50],[76,57],[80,65],[84,74],[88,84]] | fan demand from the GPU temperature |
 | `fanBoost.fullDutyCpuC` / `fullDutyGpuC` | 95 / 90 | critical: 100 % at once, no ramp |
 | `fanBoost.criticalSeconds` | 4 | raw critical heat must last this long (or the smoothed value be critical) |
@@ -159,7 +171,7 @@ fan values are % of full duty. Curves are lists of `[temperature, percent]` poin
 | `fanBoost.gameMode.detectFullscreen` | true | a fullscreen foreground app + busy GPU counts as a game |
 | `fanBoost.gameMode.protectGame` | true | never lower the game's priority |
 | `fanBoost.gameMode.rampUpStepPercent` | 3 | faster ramp-up while gaming |
-| `fanBoost.gameMode.curveCpu` | [[65,45],[71,54],[77,65],[83,77],[89,86],[93,90]] | game curve (CPU) |
+| `fanBoost.gameMode.curveCpu` | [[65,45],[71,55],[77,67],[83,78],[88,86],[91,90]] | game curve (CPU) |
 | `fanBoost.gameMode.curveGpu` | [[60,45],[66,54],[72,64],[78,74],[83,82],[87,88]] | game curve (GPU) |
 | `fanBoost.gameMode.exeList` | popular games | process names (without .exe) that always count as games |
 | `fanBoost.gameMode.excludeExes` | browsers, players… | fullscreen apps that are never games |

@@ -98,5 +98,10 @@
   "evPrio": "{0} given lower priority to cool the CPU",
   "evUpdate": "Updated to v{0}",
   "evResume": "Resumed after sleep",
-  "evFailsafe": "Fan control error \u2014 fans returned to automatic"
+  "evFailsafe": "Fan control error \u2014 fans returned to automatic",
+  "rpCpu100": "CPU time above 100\u00b0",
+  "rpGpu100": "GPU time above 100\u00b0",
+  "rp100Sub": "{0} episodes \u00b7 longest {1}",
+  "lgOver100": "Above 100\u00b0",
+  "evCpuFast": "CPU jumped to {0}\u00b0 \u2014 turbo off early"
 }
