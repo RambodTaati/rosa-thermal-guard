@@ -8,3 +8,4 @@ ui*.png
 *.exe
 *.dll
 *.zip
+src/update/

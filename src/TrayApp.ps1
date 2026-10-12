@@ -1,7 +1,7 @@
 ﻿<#  Rosa Thermal Guard - tray app (MIT License)
     One hidden PowerShell process: the guard engine (ThermalGuard.ps1) runs in a background runspace,
     the UI is a tray icon (green / orange / red) plus a compact dark WPF window (English or Persian).
-    Flag files in %ProgramData%\RosaThermalGuard: show.flag opens the window, snap.flag saves ui.png,
+    Flag files in %ProgramData%\RosaThermalGuard: show.flag opens the window, snap.flag saves ui.png, report.flag opens the report window,
     minimize.flag minimizes it, stop.flag exits cleanly (settings restored). #>
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
@@ -9,7 +9,7 @@ $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Join-Path $env:ProgramData 'RosaThermalGuard'
 if (-not (Test-Path $Root)) { New-Item -ItemType Directory $Root -Force | Out-Null }
 $Inv = [Globalization.CultureInfo]::InvariantCulture
-function UiLog([string]$m) { try { Add-Content (Join-Path $Root 'guard.log') ("{0} [UI] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) -Encoding UTF8 } catch {} }
+function UiLog([string]$m) { $line = "{0} [UI] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m; for ($i = 0; $i -lt 4; $i++) { try { Add-Content (Join-Path $Root 'guard.log') $line -Encoding UTF8 -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 40 } } }
 
 $uiMutex = New-Object Threading.Mutex($false, 'Global\RosaThermalGuardUI')
 if (-not $uiMutex.WaitOne(0)) { exit 0 }
@@ -52,6 +52,14 @@ function Set-TrayIcon([string]$hex, [string]$text) {
 $LangDir = Join-Path $AppDir 'lang'
 $UserSettings = Join-Path $Root 'settings.json'
 $LangNames = [ordered]@{ 'fa' = 'فارسی'; 'en' = 'English'; 'ar' = 'العربية'; 'zh-CN' = '中文' }
+function Get-UserSettings { try { return (Get-Content $UserSettings -Raw -ErrorAction Stop | ConvertFrom-Json) } catch { return $null } }
+function Save-UserSettings([hashtable]$changes) {
+  $h = [ordered]@{}; $u = Get-UserSettings
+  if ($u) { foreach ($pp in $u.PSObject.Properties) { $h[$pp.Name] = $pp.Value } }
+  foreach ($k in $changes.Keys) { $h[$k] = $changes[$k] }
+  try { ($h | ConvertTo-Json) | Set-Content $UserSettings -Encoding UTF8 } catch {}
+}
+$script:graphOpen = $false; try { $script:graphOpen = [bool](Get-UserSettings).graphOpen } catch {}
 function Get-LangCode {
   $code = $null
   try { $u = Get-Content $UserSettings -Raw -ErrorAction Stop | ConvertFrom-Json; if ($u.language) { $code = [string]$u.language } } catch {}
@@ -73,15 +81,37 @@ function N([string]$s) { if ($T.digits -ne 'persian') { return $s }; $d = '۰۱�
 Load-Lang (Get-LangCode)
 
 # ---------- window ----------
-function Get-ArcGeometry([double]$frac) {
-  $frac = [Math]::Max(0.001, [Math]::Min(1, $frac))
-  $cx = 75; $cy = 75; $r = 62; $start = 135; $sweep = 270 * $frac
+function Get-ArcGeometry([double]$frac, [double]$radius = 62) {
+  $frac = [Math]::Max(0.001, [Math]::Min(1.0, $frac))   # 1.0, not 1: [Math]::Min(1, x) picks the int overload and rounds x to 0 or 1 (the "ring suddenly full" bug)
+  $cx = 75; $cy = 75; $r = $radius; $start = 135; $sweep = 270 * $frac
   $a1 = $start * [Math]::PI / 180; $a2 = ($start + $sweep) * [Math]::PI / 180
   $x1 = $cx + $r * [Math]::Cos($a1); $y1 = $cy + $r * [Math]::Sin($a1)
   $x2 = $cx + $r * [Math]::Cos($a2); $y2 = $cy + $r * [Math]::Sin($a2)
   $large = if ($sweep -gt 180) { 1 } else { 0 }
   [Windows.Media.Geometry]::Parse([string]::Format($Inv, 'M {0:F2},{1:F2} A {2},{2} 0 {3} 1 {4:F2},{5:F2}', $x1, $y1, $r, $large, $x2, $y2))
 }
+# ---------- temperature arcs: linear 0-100 C for CPU and GPU (60 C = 60 % filled, 100 C = full), clamped; eased toward the reading ----------
+# rises ease with ~2 s, falls with ~1.2 s, so a single-sample turbo spike moves the arc a little instead of filling it
+$script:arc = @{ Ct = $null; Cp = $null; Gt = $null; Gp = $null; Ck = ''; Gk = '' }
+$script:arcLast = 0.0
+function Arc-Frac($t, [double]$lo, [double]$hi) { if ($t -eq $null) { return 0.0 }; return [Math]::Max(0.0, [Math]::Min(1.0, ([double]$t - $lo) / ($hi - $lo))) }
+function Step-ArcAnim([double]$now) {
+  $dt = [Math]::Min(0.25, [Math]::Max(0.0, $now - $script:arcLast)); $script:arcLast = $now
+  $a = $script:arc
+  foreach ($k in 'C', 'G') {
+    $tgt = $a["${k}t"]; if ($tgt -eq $null) { continue }
+    $cur = $a["${k}p"]; if ($cur -eq $null) { $cur = [double]$tgt }
+    $tau = if ($tgt -gt $cur) { 2.0 } else { 1.2 }
+    $cur = $cur + ($tgt - $cur) * (1.0 - [Math]::Exp(-$dt / $tau)); $a["${k}p"] = $cur
+    $hi = 100.0
+    $f = Arc-Frac $cur 0.0 $hi
+    $key = [string][Math]::Round($f * 600)          # redraw only when it moved visibly (0.45 deg)
+    if ($key -ne $a["${k}k"]) { $a["${k}k"] = $key; $ui["${k}puArc"].Data = Get-ArcGeometry $f }
+    $hex = Temp-Hex $cur
+    if ($ui["${k}puArc"].Tag -ne $hex) { $ui["${k}puArc"].Tag = $hex; $ui["${k}puArc"].Stroke = Brush $hex }
+  }
+}
+function Temp-Hex($t) { if ($t -eq $null) { '#4B5263' } elseif ($t -lt 80) { '#34D399' } elseif ($t -lt 90) { '#FBBF24' } elseif ($t -lt 95) { '#FB923C' } else { '#F43F5E' } }
 function Get-TempBrush($t) {
   $hex = if ($t -eq $null) { '#4B5263' } elseif ($t -lt 80) { '#34D399' } elseif ($t -lt 90) { '#FBBF24' } elseif ($t -lt 95) { '#FB923C' } else { '#F43F5E' }
   New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex))
@@ -128,6 +158,17 @@ function Update-Graph {
     }
   }
   $ui.Fan1Line.Points = $f1; $ui.Fan2Line.Points = $f2
+  # game mode: thin violet band along the top
+  $gg = New-Object Windows.Media.GeometryGroup; $gs = -1
+  for ($i = 0; $i -le $history.Count; $i++) {
+    $on = ($i -lt $history.Count) -and [bool]$history[$i].GM
+    if ($on -and $gs -lt 0) { $gs = $i }
+    if (-not $on -and $gs -ge 0) {
+      $x0 = [Math]::Max(0.0, ($off + $gs) * $step - $step / 2); $x1 = [Math]::Min($w, ($off + $i - 1) * $step + $step / 2)
+      $gg.Children.Add((New-Object Windows.Media.RectangleGeometry (New-Object Windows.Rect($x0, 0, [Math]::Max(1.0, $x1 - $x0), 3)))); $gs = -1
+    }
+  }
+  $ui.GameBand.Data = $gg
   $ui.ShadeBoost.Data = $sb; $ui.ShadeMax.Data = $sm; $ui.BandBoost.Data = $bb; $ui.BandMax.Data = $bm
   $ui.TFan.Visibility = $(if ($f1.Count -gt 0 -or $f2.Count -gt 0) { 'Visible' } else { 'Collapsed' })
 }
@@ -151,10 +192,28 @@ function Show-Window([string]$why = '') {
     if ($why) { UiLog "window shown ($why)" }
   } catch { UiLog "show window error: $($_.Exception.Message)" }
 }
+function Set-GraphOpen([bool]$open, [bool]$animate) {
+  $script:graphOpen = $open
+  $ui.GraphChev.Text = $(if ($open) { [string][char]0x25B4 } else { [string][char]0x25BE })
+  $ui.GraphBtnText.Text = $(if ($open) { $T.hideGraph } else { $T.showGraph })
+  $hp = [Windows.FrameworkElement]::HeightProperty
+  if ($open) { try { Update-Graph } catch {} }
+  if (-not $animate -or -not $window.IsVisible) {
+    $ui.GraphWrap.BeginAnimation($hp, $null); $ui.GraphWrap.Height = $(if ($open) { [double]::NaN } else { 0.0 }); return
+  }
+  $w = [Math]::Max(100.0, $ui.GraphBtn.ActualWidth)
+  $ui.GraphPanel.Measure((New-Object Windows.Size($w, [double]::PositiveInfinity)))
+  $from = $ui.GraphWrap.ActualHeight; $to = $(if ($open) { $ui.GraphPanel.DesiredSize.Height } else { 0.0 })
+  $an = New-Object Windows.Media.Animation.DoubleAnimation($from, $to, (New-Object Windows.Duration([TimeSpan]::FromMilliseconds(240))))
+  $ez = New-Object Windows.Media.Animation.CubicEase; $ez.EasingMode = 'EaseOut'; $an.EasingFunction = $ez
+  $an.Add_Completed({ $ui.GraphWrap.BeginAnimation([Windows.FrameworkElement]::HeightProperty, $null); $ui.GraphWrap.Height = $(if ($script:graphOpen) { [double]::NaN } else { 0.0 }) })
+  $ui.GraphWrap.BeginAnimation($hp, $an)
+}
 function Toggle-Pause {
   if ($sync.PauseUntil -gt (Get-Date)) { $sync.PauseUntil = [datetime]::MinValue; UiLog 'resume clicked' }
   else { $sync.PauseUntil = (Get-Date).AddMinutes(15); UiLog 'pause 15 min clicked' }
 }
+. (Join-Path $AppDir 'Report.ps1')   # graphical report window (Show-Report)
 function Build-Window {
 $xamlText = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -185,9 +244,11 @@ $xamlText = @'
       <Grid Margin="0,10,0,0">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" HorizontalAlignment="Center">
-          <Grid Width="150" Height="150" FlowDirection="LeftToRight">
+          <Grid x:Name="CpuRing" Background="Transparent" Width="150" Height="150" FlowDirection="LeftToRight">
             <Path x:Name="CpuTrack" Stroke="#FF262A36" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
             <Path x:Name="CpuArc" Stroke="#34D399" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="CpuFanTrack" Stroke="#FF1A1F2B" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="CpuFanArc" Stroke="#FF0EA5E9" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
               <TextBlock x:Name="CpuVal" Text="--°" Foreground="#FFF1F3F8" FontSize="34" FontWeight="Light" HorizontalAlignment="Center"/>
               <TextBlock Text="CPU" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Center"/>
@@ -196,9 +257,11 @@ $xamlText = @'
           <TextBlock Text="{{cpuTemp}}" Foreground="#FFC9CEDB" FontSize="13" HorizontalAlignment="Center" Margin="0,2,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="1" HorizontalAlignment="Center">
-          <Grid Width="150" Height="150" FlowDirection="LeftToRight">
+          <Grid x:Name="GpuRing" Background="Transparent" Width="150" Height="150" FlowDirection="LeftToRight">
             <Path x:Name="GpuTrack" Stroke="#FF262A36" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
             <Path x:Name="GpuArc" Stroke="#60A5FA" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="GpuFanTrack" Stroke="#FF1A1F2B" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            <Path x:Name="GpuFanArc" Stroke="#FF0EA5E9" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
               <TextBlock x:Name="GpuVal" Text="--°" Foreground="#FFF1F3F8" FontSize="34" FontWeight="Light" HorizontalAlignment="Center"/>
               <TextBlock x:Name="GpuSub" Text="GPU" Foreground="#FF6B7285" FontSize="11" HorizontalAlignment="Center"/>
@@ -220,9 +283,14 @@ $xamlText = @'
           <Border Height="1" Background="#FF262A36" Margin="0,10,0,8"/>
           <Grid>
             <TextBlock Text="{{fans}}" Foreground="#FF8A91A5" FontSize="13" VerticalAlignment="Center"/>
-            <Border x:Name="FanBadge" HorizontalAlignment="Right" VerticalAlignment="Center" CornerRadius="9" Padding="10,2,10,3" Background="#2660A5FA">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+              <Border x:Name="GameBadge" Visibility="Collapsed" VerticalAlignment="Center" CornerRadius="9" Padding="10,2,10,3" Margin="0,0,6,0" Background="#338B5CF6">
+                <TextBlock x:Name="GameBadgeText" Text="{{gameMode}}" Foreground="#FFC4B5FD" FontSize="11.5" FontWeight="SemiBold"/>
+              </Border>
+              <Border x:Name="FanBadge" VerticalAlignment="Center" CornerRadius="9" Padding="10,2,10,3" Background="#2660A5FA">
               <TextBlock x:Name="FanBadgeText" Text="-" Foreground="#FF60A5FA" FontSize="11.5" FontWeight="SemiBold"/>
             </Border>
+            </StackPanel>
           </Grid>
           <StackPanel Grid.IsSharedSizeScope="True" Margin="0,0,0,2">
             <Grid x:Name="FanRow1" Margin="0,8,0,0" Background="Transparent">
@@ -259,6 +327,14 @@ $xamlText = @'
 
         </StackPanel>
       </Border>
+      <Border x:Name="GraphBtn" Margin="0,12,0,0" CornerRadius="10" Background="#FF1B1E27" Padding="10,6" Cursor="Hand">
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+          <TextBlock x:Name="GraphChev" Text="&#x25BE;" Foreground="#FF8A91A5" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <TextBlock x:Name="GraphBtnText" Text="{{showGraph}}" Foreground="#FFC9CEDB" FontSize="12.5" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Border>
+      <Border x:Name="GraphWrap" Height="0" ClipToBounds="True">
+        <StackPanel x:Name="GraphPanel" VerticalAlignment="Top">
       <Grid Margin="0,14,0,6">
         <TextBlock Text="{{last5}}" Foreground="#FF8A91A5" FontSize="12"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
@@ -277,6 +353,7 @@ $xamlText = @'
           <Path x:Name="ShadeMax" Fill="#1CF43F5E"/>
           <Path x:Name="BandBoost" Fill="#CCFBBF24"/>
           <Path x:Name="BandMax" Fill="#DDF43F5E"/>
+          <Path x:Name="GameBand" Fill="#DD8B5CF6"/>
           <TextBlock x:Name="TFan" Text="100%" Foreground="#992DD4BF" FontSize="9"/>
           <Polyline x:Name="Fan2Line" Stroke="#C4B5FD" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
           <Polyline x:Name="Fan1Line" Stroke="#2DD4BF" StrokeThickness="1.3" StrokeDashArray="3 2" StrokeLineJoin="Round" Opacity="0.85"/>
@@ -292,15 +369,19 @@ $xamlText = @'
         <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#CCFBBF24" VerticalAlignment="Center"/>
         <TextBlock Text="{{lgBoost}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
         <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DDF43F5E" VerticalAlignment="Center"/>
-        <TextBlock Text="{{lgMax}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,0,0"/>
+        <TextBlock Text="{{lgMax}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,10,0"/>
+        <Rectangle Width="10" Height="4" RadiusX="1" RadiusY="1" Fill="#DD8B5CF6" VerticalAlignment="Center"/>
+        <TextBlock Text="{{gameMode}}" Foreground="#FF8A91A5" FontSize="11" Margin="4,0,0,0"/>
       </WrapPanel>
+        </StackPanel>
+      </Border>
       <Grid Margin="0,14,0,0">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
         <Border x:Name="PauseBtn" Grid.Column="0" CornerRadius="12" Background="#FF232734" Padding="0,8" Cursor="Hand">
           <TextBlock x:Name="PauseText" Text="{{pause15}}" Foreground="#FFE2E6EF" FontSize="13" HorizontalAlignment="Center"/>
         </Border>
         <Border x:Name="LogBtn" Grid.Column="2" CornerRadius="12" Background="#FF232734" Padding="0,8" Cursor="Hand">
-          <TextBlock Text="{{log}}" Foreground="#FFE2E6EF" FontSize="13" HorizontalAlignment="Center"/>
+          <TextBlock Text="{{report}}" Foreground="#FFE2E6EF" FontSize="13" HorizontalAlignment="Center"/>
         </Border>
       </Grid>
       <StackPanel x:Name="LangBar" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0" FlowDirection="LeftToRight"/>
@@ -312,11 +393,15 @@ foreach ($p in $T.PSObject.Properties) { $xamlText = $xamlText.Replace('{{' + $p
 [xml]$xaml = $xamlText
 $script:window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $script:ui = @{}
-foreach ($n in 'Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','ShadeBoost','ShadeMax','BandBoost','BandMax','TFan','Fan1Line','Fan2Line','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
+foreach ($n in 'GraphBtn','GraphChev','GraphBtnText','GraphWrap','GraphPanel','CpuRing','GpuRing','CpuFanTrack','CpuFanArc','GpuFanTrack','GpuFanArc','Card','Dot','CloseBtn','MinBtn','Pill','StatusText','CpuTrack','CpuArc','CpuVal','GpuTrack','GpuArc','GpuVal','GpuSub','MaxPct','GpuLimit','FanBadge','FanBadgeText','FanRow1','FanRow2','Fan1Icon','Fan2Icon','Fan1Track','Fan2Track','Fan1Fill','Fan2Fill','Fan1Pct','Fan2Pct','Graph','L100','L90','T100','GpuLine','CpuLine','ShadeBoost','ShadeMax','BandBoost','BandMax','GameBand','GameBadge','GameBadgeText','TFan','Fan1Line','Fan2Line','PauseBtn','PauseText','LogBtn','LangBar') { $ui[$n] = $window.FindName($n) }
 
-$ui.CpuTrack.Data = Get-ArcGeometry 1; $ui.GpuTrack.Data = Get-ArcGeometry 1
-$window.Add_IsVisibleChanged({ if ($window.IsVisible) { $script:fanLast = $fanSw.Elapsed.TotalSeconds; $fanAnim.Start() } else { $fanAnim.Stop() } })
+$ui.CpuTrack.Data = Get-ArcGeometry 1; $ui.GpuTrack.Data = Get-ArcGeometry 1; $ui.CpuFanTrack.Data = Get-ArcGeometry 1 72; $ui.GpuFanTrack.Data = Get-ArcGeometry 1 72; $script:fanRingKey = @{ 1 = ""; 2 = "" }
+$window.Add_IsVisibleChanged({ if ($window.IsVisible) { $script:fanLast = $fanSw.Elapsed.TotalSeconds; $script:arcLast = $script:fanLast; $script:arc.Cp = $null; $script:arc.Gp = $null; $script:arc.Ck = ""; $script:arc.Gk = ""; $script:arc.Ct = $sync.Cpu; $script:arc.Gt = $sync.Gpu; try { Step-ArcAnim $script:arcLast } catch {}; $fanAnim.Start() } else { $fanAnim.Stop() } })
 
+$ui.GraphBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; Set-GraphOpen (-not $script:graphOpen) $true; Save-UserSettings @{ graphOpen = $script:graphOpen }; UiLog ("graph " + $(if ($script:graphOpen) { 'shown' } else { 'hidden' })) })
+$ui.GraphBtn.Add_MouseEnter({ $this.Background = Brush '#FF232734' }); $ui.GraphBtn.Add_MouseLeave({ $this.Background = Brush '#FF1B1E27' })
+$window.Add_SizeChanged({ if ($window.IsVisible -and $window.WindowState -eq 'Normal') { $wa = [Windows.SystemParameters]::WorkArea; $window.Top = [Math]::Max($wa.Top, $wa.Bottom - $window.ActualHeight - 4) } })
+Set-GraphOpen $script:graphOpen $false
 $window.Add_Closing({ if (-not $script:allowClose) { $_.Cancel = $true; $window.Hide() } })
 $window.Add_MouseLeftButtonDown({ try { $window.DragMove() } catch {} })
 $ui.CloseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; $window.Hide() })
@@ -326,7 +411,7 @@ foreach ($btn in $ui.MinBtn, $ui.CloseBtn) {
 }
 # Win+Down / system minimize -> tray, never the taskbar
 $window.Add_StateChanged({ if ($window.WindowState -eq 'Minimized') { $window.Hide(); $window.WindowState = 'Normal'; UiLog 'minimized -> hidden to tray' } })
-$ui.LogBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; Start-Process notepad.exe (Join-Path $Root 'guard.log') })
+$ui.LogBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; try { Show-Report '24h' } catch { UiLog "report failed: $($_.Exception.Message)"; Start-Process notepad.exe (Join-Path $Root 'guard.log') } })
 
 $ui.PauseBtn.Add_MouseLeftButtonDown({ $_.Handled = $true; Toggle-Pause })
 
@@ -363,18 +448,23 @@ function Step-FanAnim {
     $ui["Fan${i}Icon"].RenderTransform.Angle = $fs["A$i"]
     $w = $ui["Fan${i}Track"].ActualWidth
     if ($w -gt 0) { $ui["Fan${i}Fill"].Width = $(if ($pp -lt 0.005) { 0 } else { [Math]::Min($w, [Math]::Max(8.0, $w * $pp)) }) }
+    $rk = [string][Math]::Round($pp * 500)
+    if ($rk -ne $script:fanRingKey[$i]) { $script:fanRingKey[$i] = $rk; $ra = $ui[$(if ($i -eq 1) { 'CpuFanArc' } else { 'GpuFanArc' })]; $ra.Data = Get-ArcGeometry $pp 72; $ra.Opacity = $(if ($pp -lt 0.005) { 0.0 } else { 1.0 }) }
   }
 }
 $fanAnim = New-Object Windows.Threading.DispatcherTimer
 $fanAnim.Interval = [TimeSpan]::FromMilliseconds(40)   # 25 fps
-$fanAnim.Add_Tick({ try { Step-FanAnim } catch {} })
+$fanAnim.Add_Tick({ try { Step-FanAnim } catch {}; try { Step-ArcAnim $fanSw.Elapsed.TotalSeconds } catch {} })
 function Update-FanUi {
   $fs = $script:fanState
+  $ui.GameBadge.Visibility = $(if ($sync.GameMode) { 'Visible' } else { 'Collapsed' })
+  $ui.GameBadge.ToolTip = $(if ($sync.GameMode -and $sync.GameName) { [string]$sync.GameName } else { $null })
   $ok = [bool]$sync.FanOk -and [bool]$sync.FanMode
   if (-not $ok) {
     $fs.T1 = 0.0; $fs.T2 = 0.0
     $ui.FanBadge.Background = Brush '#264B5263'; $ui.FanBadgeText.Foreground = Brush '#FF8A91A5'; $ui.FanBadgeText.Text = $T.fanNA
     foreach ($i in 1, 2) { $ui["Fan${i}Pct"].Text = ''; $ui["FanRow$i"].ToolTip = $null; $ui["Fan${i}Icon"].Fill = Brush '#FF4B5263' }
+    foreach ($k in 'Cpu', 'Gpu') { $ui["${k}FanArc"].Visibility = 'Collapsed'; $ui["${k}FanTrack"].Visibility = 'Collapsed'; $ui["${k}Ring"].ToolTip = $null }
     return
   }
   foreach ($i in 1, 2) {
@@ -387,6 +477,11 @@ function Update-FanUi {
     $ui["Fan${i}Fill"].Background = New-Object Windows.Media.LinearGradientBrush ([Windows.Media.ColorConverter]::ConvertFromString((Fan-Hex2 $pp))), ([Windows.Media.ColorConverter]::ConvertFromString($hex)), 0.0
     $ui["Fan${i}Pct"].Text = N ($T.pct -f [int][Math]::Round($pp * 100))
     $ui["FanRow$i"].ToolTip = N ($T.fanRpm -f [int]$sync.FanRpm1, [int]$sync.FanRpm2)
+    $k = if ($i -eq 1) { 'Cpu' } else { 'Gpu' }
+    $ui["${k}FanArc"].Visibility = 'Visible'; $ui["${k}FanTrack"].Visibility = 'Visible'
+    $rh = if ($sync.FanBoost -and [int]$sync.FanLevel -ge 2) { '#FFCFFAFE' } elseif ($sync.FanBoost) { '#FF22D3EE' } else { '#FF0EA5E9' }
+    if ($ui["${k}FanArc"].Tag -ne $rh) { $ui["${k}FanArc"].Tag = $rh; $ui["${k}FanArc"].Stroke = Brush $rh }
+    $ui["${k}Ring"].ToolTip = N ('{0}: {1:N0} RPM ({2}%)' -f $(if ($i -eq 1) { $T.lgCpuFan } else { $T.lgGpuFan }), [int]$rpm, [int][Math]::Round($pp * 100))
   }
   $b = if ($sync.FanBoost -and [int]$sync.FanLevel -ge 2) { @('#33F43F5E', '#FFFB7185', $T.fanBoost) }
        elseif ($sync.FanBoost) { @('#33FB923C', '#FFFB923C', (N ($(if ($T.fanBoostSoft) { $T.fanBoostSoft } else { '{0}%' }) -f [int]$sync.FanBoostPct))) }
@@ -403,6 +498,7 @@ $menu = New-Object Windows.Forms.ContextMenuStrip
 $miOpen  = $menu.Items.Add('open')
 $miPause = $menu.Items.Add('pause')
 $miLog   = $menu.Items.Add('log')
+$miUpd   = $menu.Items.Add('update')
 $miLang  = New-Object Windows.Forms.ToolStripMenuItem 'lang'
 [void]$menu.Items.Add($miLang)
 foreach ($code in $LangNames.Keys) {
@@ -417,7 +513,7 @@ function Update-Menu {
   $menu.RightToLeft = $(if ($IsRtl) { 'Yes' } else { 'No' })
   $fname = ($T.font -split ',')[0].Trim()
   $menu.Font = New-Object Drawing.Font($fname, 9.5)
-  $miOpen.Text = $T.mOpen; $miLog.Text = $T.mLog; $miExit.Text = $T.mExit; $miLang.Text = $T.mLang
+  $miOpen.Text = $T.mOpen; $miLog.Text = $T.mReport; $miUpd.Text = $T.mUpdate; $miExit.Text = $T.mExit; $miLang.Text = $T.mLang
   $miPause.Text = $(if ($sync.PauseUntil -gt (Get-Date)) { $T.mResume } else { $T.mPause })
   $miOpen.Font = New-Object Drawing.Font($fname, 9.5, [Drawing.FontStyle]::Bold)
   foreach ($it in $miLang.DropDownItems) {
@@ -427,7 +523,7 @@ function Update-Menu {
 }
 function Switch-Language([string]$code) {
   if (-not (Test-Path (Join-Path $LangDir "$code.json"))) { return }
-  try { (@{ language = $code } | ConvertTo-Json) | Set-Content $UserSettings -Encoding UTF8 } catch {}
+  Save-UserSettings @{ language = $code }
   $wasVisible = $window.IsVisible
   $script:allowClose = $true; try { $window.Close() } catch {}; $script:allowClose = $false
   Load-Lang $code
@@ -441,7 +537,8 @@ $notify.ContextMenuStrip = $menu
 Update-Menu
 $miOpen.Add_Click({ Show-Window 'menu' })
 $miPause.Add_Click({ Toggle-Pause })
-$miLog.Add_Click({ Start-Process notepad.exe (Join-Path $Root 'guard.log') })
+$miLog.Add_Click({ try { Show-Report '24h' } catch { UiLog "report failed: $($_.Exception.Message)"; Start-Process notepad.exe (Join-Path $Root 'guard.log') } })
+$miUpd.Add_Click({ $sync.CheckUpdate = $true; UiLog 'check for updates clicked' })
 $script:exiting = $false
 function Exit-App {
   if ($script:exiting) { return }; $script:exiting = $true
@@ -492,7 +589,7 @@ $timer.Add_Tick({
     $notify.Text = $tip
     $miPause.Text = if ($sync.PauseUntil -gt $now) { $T.mResume } else { $T.mPause }
 
-    if ($sync.Notify) { $nk = @($sync.Notify); $sync.Notify = $null; $msg = ([string]$T.($nk[0])) -f $nk[1]; if ($msg) { $notify.ShowBalloonTip(4000, $T.title, $msg, 'Warning') } }
+    if ($sync.Notify) { $nk = @($sync.Notify); $sync.Notify = $null; $msg = ([string]$T.($nk[0])) -f $nk[1]; if ($msg) { $notify.ShowBalloonTip(5000, $T.title, $msg, $(if ([string]$nk[0] -like 'nUp*') { 'Info' } else { 'Warning' })) } }
 
     if (($now - $script:lastHist).TotalSeconds -ge 2 -and $sync.Updated) {
       $hf1 = $null; $hf2 = $null; $hm = 0
@@ -501,7 +598,7 @@ $timer.Add_Tick({
         if ($sync.FanRpm2 -ne $null) { $hf2 = 100.0 * [Math]::Min(1.0, [double]$sync.FanRpm2 / [Math]::Max(1000.0, $script:fanMaxRpm[2])) }
         if ($sync.FanBoost) { $hm = $(if ([int]$sync.FanLevel -ge 2) { 2 } else { 1 }) }
       }
-      $history.Add([pscustomobject]@{ C = $cpu; G = $gpu; F1 = $hf1; F2 = $hf2; M = $hm }); if ($history.Count -gt 150) { $history.RemoveAt(0) }
+      $history.Add([pscustomobject]@{ C = $cpu; G = $gpu; F1 = $hf1; F2 = $hf2; M = $hm; GM = [bool]$sync.GameMode }); if ($history.Count -gt 150) { $history.RemoveAt(0) }
       $script:lastHist = $now
     }
 
@@ -510,14 +607,13 @@ $timer.Add_Tick({
       $ui.Dot.Fill = $b; $ui.StatusText.Text = $st; $ui.StatusText.Foreground = $b
       $ui.Pill.Background = Brush ('#26' + $col.Substring(1))
       $ui.CpuVal.Text = $(if ($cpu -ne $null) { "$([int][Math]::Round($cpu))°" } else { '--°' })
-      $ui.CpuArc.Data = Get-ArcGeometry $(if ($cpu -ne $null) { ($cpu - 30) / 75 } else { 0 })
-      $ui.CpuArc.Stroke = Get-TempBrush $cpu
+      $script:arc.Ct = $cpu   # the arc eases toward this (Step-ArcAnim), so a 1 s spike does not snap it to full
       if ($gpu -ne $null) {
         $ui.GpuVal.Text = "$([int][Math]::Round($gpu))°"; $ui.GpuSub.Text = 'GPU'
-        $ui.GpuArc.Data = Get-ArcGeometry (($gpu - 30) / 75); $ui.GpuArc.Stroke = Get-TempBrush $gpu
+        $script:arc.Gt = $gpu
       } else {
         $ui.GpuVal.Text = '—'; $ui.GpuSub.Text = $T.igpu
-        $ui.GpuArc.Data = Get-ArcGeometry 0.001; $ui.GpuArc.Stroke = Brush '#4B5263'
+        $script:arc.Gt = $null; $script:arc.Gp = $null; $ui.GpuArc.Data = Get-ArcGeometry 0.001; $ui.GpuArc.Stroke = Brush '#4B5263'
       }
       $ui.MaxPct.Text = ($T.pct -f (N ([string]$(if ($sync.MaxPct) { $sync.MaxPct } else { 100 })))) + $(if ($sync.Level -gt 0) { $T.reduced } else { '' })
       $ui.GpuLimit.Text = switch ($sync.GpuMode) {
@@ -528,12 +624,14 @@ $timer.Add_Tick({
       }
       Update-FanUi
       $ui.PauseText.Text = if ($sync.PauseUntil -gt $now) { $T.resume } else { $T.pause15 }
-      Update-Graph
+      if ($script:graphOpen) { Update-Graph }   # collapsed: history keeps recording, nothing is drawn
     }
 
     # flags from outside (no admin needed)
     if (Test-Path (Join-Path $Root 'show.flag')) { Remove-Item (Join-Path $Root 'show.flag') -Force; Show-Window 'show.flag' }
     if (Test-Path (Join-Path $Root 'snap.flag')) { Remove-Item (Join-Path $Root 'snap.flag') -Force; Show-Window; $script:snapPending = 3 }
+    $rf = Join-Path $Root 'report.flag'   # 'report.flag' with e.g. '24h snap' opens the report (and saves report-<lang>.png)
+    if (Test-Path $rf) { $c = ([string](Get-Content $rf -Raw)).Trim(); Remove-Item $rf -Force; $rg = if ($c -match '(1h|24h|7d)') { $matches[1] } else { '24h' }; try { if ($c -match 'snap') { Show-Report $rg (Join-Path $Root "report-$lang.png") -Hidden } else { Show-Report $rg } } catch { UiLog "report failed: $($_.Exception.Message)" } }
     if ($script:snapPending -gt 0) {
       $script:snapPending--
       if ($script:snapPending -eq 0) {

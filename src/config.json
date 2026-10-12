@@ -1,6 +1,6 @@
 {
   "language": "auto",
-  "pollSeconds": 2,
+  "pollSeconds": 1,
   "cpu": {
     "throttleC": 90,
     "criticalC": 95,
@@ -15,7 +15,7 @@
     ],
     "minSecondsBetweenSteps": 6,
     "maxTurboHoldSeconds": 600,
-    "triggerSamples": 2
+    "triggerSeconds": 2
   },
   "gpu": {
     "throttleC": 88,
@@ -25,7 +25,7 @@
       55,
       40
     ],
-    "triggerSamples": 2
+    "triggerSeconds": 2
   },
   "fanBoost": {
     "enabled": true,
@@ -46,15 +46,39 @@
     "handBackMarginPercent": 4,
     "handBackFallbackPercent": 25,
     "smoothingSeconds": 12,
-    "criticalSamples": 3,
+    "criticalSeconds": 4,
+    "gameMode": {
+      "enabled": true,
+      "gpuUtilPercent": 60,
+      "enterSeconds": 10,
+      "exitSeconds": 60,
+      "detectFullscreen": true,
+      "protectGame": true,
+      "rampUpStepPercent": 3,
+      "curveCpu": [[65, 45], [71, 54], [77, 65], [83, 77], [89, 86], [93, 90]],
+      "curveGpu": [[60, 45], [66, 54], [72, 64], [78, 74], [83, 82], [87, 88]],
+      "exeList": ["cs2", "VALORANT-Win64-Shipping", "FortniteClient-Win64-Shipping", "r5apex", "eldenring", "Cyberpunk2077", "GTA5", "GTA5_Enhanced", "RDR2", "bg3", "bg3_dx11", "FC25", "FC26", "bf2042", "Overwatch", "dota2", "League of Legends", "RocketLeague", "Starfield", "witcher3", "helldivers2", "Minecraft.Windows"],
+      "excludeExes": ["explorer", "ShellExperienceHost", "StartMenuExperienceHost", "SearchHost", "LockApp", "TextInputHost", "ApplicationFrameHost", "msedge", "chrome", "firefox", "brave", "opera", "vlc", "mpc-hc64", "PotPlayerMini64", "ms-teams", "Teams", "Zoom", "POWERPNT"]
+    },
     "maxDuty": 229,
     "maxRpmCpuFan": 6400,
     "maxRpmGpuFan": 6900
-  },  "pauseCancelC": 97,
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "checkHours": 24
+  },
+  "pauseCancelC": 97,
   "lowerPriorityTopN": 3,
   "notifications": true,
   "allowSimulateFile": false,
-  "maxLogKB": 1024,
+  "logging": {
+    "maxSizeMB": 5,
+    "keepFiles": 5,
+    "keepDays": 7,
+    "totalMaxMB": 20,
+    "tempsEverySec": 5
+  },
   "protectedProcesses": [
     "System",
     "Idle",

@@ -1,6 +1,6 @@
 ﻿; Rosa Thermal Guard - Inno Setup script (build with build.ps1)
 #define AppName "Rosa Thermal Guard"
-#define AppVersion "1.1.0"
+#define AppVersion Trim(FileRead(FileOpen(AddBackslash(SourcePath) + "..\src\version.txt")))
 #define AppPublisher "Rosa Thermal Guard contributors"
 
 [Setup]
@@ -60,7 +60,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "{commonappdata}\RosaThermalGuard"; Permissions: users-modify
 
 [Files]
-Source: "..\src\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "..\src\*"; DestDir: "{app}"; Excludes: "config.json"; Flags: ignoreversion recursesubdirs
+; config.json is only written on a fresh install: upgrades (also silent auto-updates) keep the user's settings
+Source: "..\src\config.json"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "..\build\lib\*"; DestDir: "{app}\lib"; Flags: ignoreversion
 Source: "..\assets\app.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -94,7 +96,9 @@ function AppLang(Param: String): String;
 var L: String;
 begin
   L := ActiveLanguage();
-  if L = 'farsi' then Result := 'fa'
+  { silent upgrade (auto-update): keep the language already configured }
+  if WizardSilent() and FileExists(ExpandConstant('{app}\config.json')) then Result := 'keep'
+  else if L = 'farsi' then Result := 'fa'
   else if L = 'arabic' then Result := 'ar'
   else if L = 'chinesesimp' then Result := 'zh-CN'
   else Result := 'en';

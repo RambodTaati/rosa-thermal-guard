@@ -10,6 +10,9 @@
        GB_WMIACPI_Set, the one Control Center uses): takes over from auto only when the temperature curve wants
        more airflow, moves the duty in small steps, hysteresis + minimum hold, 100 % only when critical, ramps down
        to about the auto speed before handing back (also on exit, uninstall and after a crash). See fanBoost.
+  Game mode: GPU load + fullscreen/listed game -> earlier fan curve and the game is never deprioritized (fanBoost.gameMode).
+  Auto-update: Updater.ps1 checks GitHub ~daily and downloads + verifies (SHA-256); the guard installs a verified update
+        only when idle and cool (no game mode, no throttling, no fan control), after restoring everything (autoUpdate).
   All thresholds come from config.json next to this script.
   Switches: -TestMode (simulated temps, real actions, then restore)
             -Restore  (put saved original settings back and exit)
@@ -20,7 +23,7 @@ param(
   [switch]$Restore,
   [switch]$Once,
   [hashtable]$Sync = $null,   # set by TrayApp.ps1 (status out, Pause/Stop in)
-  [int]$PollSeconds = 2
+  [double]$PollSeconds = 0
 )
 $ErrorActionPreference = 'Continue'
 $AppDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -51,23 +54,229 @@ $GPU_HOT  = [double](CfgVal $cGpu 'throttleC' 88)
 $GPU_COOL = [double](CfgVal $cGpu 'restoreC' 78)
 $GPU_CLOCK_STEPS = @(CfgVal $cGpu 'clockStepsPercent' @(75, 55, 40) | ForEach-Object { [int]$_ })
 $PAUSE_CANCEL = [double](CfgVal $Cfg 'pauseCancelC' 97)
-$CPU_HOT_N = [Math]::Max(1, [int](CfgVal $cCpu 'triggerSamples' 2))   # ignore single-sample spikes
-$GPU_HOT_N = [Math]::Max(1, [int](CfgVal $cGpu 'triggerSamples' 2))
+$CPU_HOT_SEC = [Math]::Max(0.0, [double](CfgVal $cCpu 'triggerSeconds' 2))   # heat must last this long (spike filter)
+$GPU_HOT_SEC = [Math]::Max(0.0, [double](CfgVal $cGpu 'triggerSeconds' 2))
 $TOP_N = [int](CfgVal $Cfg 'lowerPriorityTopN' 3)
 $NOTIFY = [bool](CfgVal $Cfg 'notifications' $true)
 $ALLOW_SIM = [bool](CfgVal $Cfg 'allowSimulateFile' $false)
-$MaxLogBytes = [int](CfgVal $Cfg 'maxLogKB' 1024) * 1KB
-if ($PollSeconds -eq 2) { $PollSeconds = [int](CfgVal $Cfg 'pollSeconds' 2) }
+$cLog = CfgVal $Cfg 'logging' $null
+$LOG_MAX = [Math]::Max(0.25, [double](CfgVal $cLog 'maxSizeMB' 5)) * 1MB      # rotate guard.log at this size
+$LOG_KEEP = [Math]::Max(1, [int](CfgVal $cLog 'keepFiles' 5))                # guard.1.log.gz ... guard.N.log.gz
+$LOG_DAYS = [Math]::Max(1.0, [double](CfgVal $cLog 'keepDays' 7))            # archives older than this are deleted
+$LOG_TOTAL = [Math]::Max(1.0, [double](CfgVal $cLog 'totalMaxMB' 20)) * 1MB  # guard.log + archives never above this
+$TEMPS_EVERY = [Math]::Max(1.0, [double](CfgVal $cLog 'tempsEverySec' 5))    # temps line while something is active (idle: 60 s); events always
+$script:LogCheckAt = [datetime]::MinValue
+if ($PollSeconds -le 0) { $PollSeconds = [double](CfgVal $Cfg 'pollSeconds' 1) }
+$PollSeconds = [Math]::Max(0.5, [Math]::Min(10.0, $PollSeconds))   # sensor polling interval; everything else below is time-based
+$cUpd = CfgVal $Cfg 'autoUpdate' $null
+$UPD_ON = [bool](CfgVal $cUpd 'enabled' $true)
+$UPD_HOURS = [Math]::Max(1.0, [double](CfgVal $cUpd 'checkHours' 24))
+$AppVersion = '0.0.0'; try { $AppVersion = (Get-Content (Join-Path $AppDir 'version.txt') -Raw -ErrorAction Stop).Trim() } catch {}
+
+# ---- auto-update (installs only files Updater.ps1 verified; re-verified right before running) ----
+$script:TopScanAt = [datetime]::MinValue; $script:UpdFlagAt = [datetime]::MinValue
+$UpdScript = Join-Path $AppDir 'Updater.ps1'
+$UpdDir = Join-Path $AppDir 'update'             # under Program Files: admin-only
+$UpdReady = Join-Path $UpdDir 'ready.json'
+$UpdDone = Join-Path $DataDir 'update-done.json'
+$UpdStatus = Join-Path $DataDir 'update-status.json'
+$script:UpdNext = (Get-Date).AddSeconds(300 + (Get-Random -Minimum 0 -Maximum 180))   # first check ~5 min after start, with jitter
+$script:UpdFail = 0; $script:UpdProc = $null; $script:UpdProcAt = $null; $script:UpdManual = $false; $script:UpdSafeSince = $null; $script:UpdReadyAt = [datetime]::MinValue; $script:UpdBusy = $false
+function Update-Startup {
+  if (-not (Test-Path $UpdDone)) { return }
+  try {
+    $d = Get-Content $UpdDone -Raw | ConvertFrom-Json
+    if ([string]$d.to -eq $AppVersion) { Write-Log "update: now running v$AppVersion (updated from v$($d.from))"; Show-Notice 'nUpdated' $AppVersion; Remove-Item $UpdReady -Force -ErrorAction SilentlyContinue }
+    else { Write-Log "update: install of v$($d.to) did not complete (still v$AppVersion) - see update-install.log; retrying later"; $script:UpdFail = 3; $script:UpdNext = (Get-Date).AddHours(6); Remove-Item $UpdReady -Force -ErrorAction SilentlyContinue }
+  } catch {}
+  Remove-Item $UpdDone -Force -ErrorAction SilentlyContinue
+  Get-ChildItem $UpdDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'ready.json' -and -not (Test-Path $UpdReady) } | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+function Update-Start([bool]$manual) {
+  if (-not (Test-Path $UpdScript)) { return }
+  $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$UpdScript`"")
+  if ($manual) { $a += '-Manual' }
+  $script:UpdProc = Start-Process "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $a -WindowStyle Hidden -PassThru
+  $script:UpdProcAt = Get-Date; $script:UpdManual = $manual
+}
+function Update-Done {
+  $st = $null; try { $st = Get-Content $UpdStatus -Raw | ConvertFrom-Json } catch {}
+  $res = if ($st) { [string]$st.result } else { 'error' }
+  if ($res -eq 'error') {
+    $script:UpdFail++
+    $h = [Math]::Min($UPD_HOURS, [Math]::Pow(2, $script:UpdFail - 1))     # backoff 1, 2, 4, 8 ... h, at most checkHours
+    $script:UpdNext = (Get-Date).AddHours($h).AddMinutes((Get-Random -Minimum 0 -Maximum 20))
+    Write-Log ("update: next try in ~{0:N0} h (failure {1})" -f $h, $script:UpdFail)
+    if ($script:UpdManual) { Show-Notice 'nUpdateFail' $(if ($st) { [string]$st.message } else { '?' }) }
+  } else {
+    $script:UpdFail = 0
+    $script:UpdNext = (Get-Date).AddHours($UPD_HOURS).AddMinutes((Get-Random -Minimum 0 -Maximum 60))
+    if ($res -eq 'uptodate' -and $script:UpdManual) { Show-Notice 'nUpToDate' $AppVersion }
+    if ($res -eq 'ready') { Show-Notice 'nUpdateReady' ([string]$st.latest) }
+  }
+  $script:UpdProc = $null; $script:UpdManual = $false
+}
+function Update-Tick($now, $cpu, $gpu, $sim, $paused) {
+  if (($now - $script:UpdFlagAt).TotalSeconds -ge 5) { $script:UpdFlagAt = $now; $fl = Join-Path $DataDir 'checkupdate.flag'; if (Test-Path $fl) { Remove-Item $fl -Force -ErrorAction SilentlyContinue; $Sync.CheckUpdate = $true } }   # same as the tray menu item (a check is harmless)
+  if ($Sync.CheckUpdate) { $Sync.CheckUpdate = $false; if (-not $script:UpdProc) { Write-Log 'update: check requested from the tray'; Update-Start $true } }
+  if ($script:UpdProc) {
+    if ($script:UpdProc.HasExited) { Update-Done }
+    elseif (($now - $script:UpdProcAt).TotalMinutes -ge 15) { try { $script:UpdProc.Kill() } catch {}; Write-Log 'update: checker took over 15 min - stopped'; Update-Done }
+    return
+  }
+  if ($UPD_ON -and $now -ge $script:UpdNext) { Update-Start $false; return }
+  # install a verified update only when it is safe: nothing controlled, no game, cool, for 60 s in a row
+  if (($now - $script:UpdReadyAt).TotalSeconds -lt 5) { return }
+  $script:UpdReadyAt = $now
+  if (-not (Test-Path $UpdReady)) { $script:UpdSafeSince = $null; return }
+  $safe = -not $GameMode -and -not $FanBoosted -and $CpuLevel -eq 0 -and -not $GpuThrottled -and $Reniced.Count -eq 0 -and -not $sim -and -not $paused -and
+          $cpu -ne $null -and $(if ($fanCpuS -ne $null) { $fanCpuS -lt 75 } else { $cpu -lt 80 }) -and $(if ($fanGpuS -ne $null) { $fanGpuS -lt 72 } elseif ($gpu -ne $null) { $gpu -lt 75 } else { $true })   # smoothed: brief turbo spikes do not block it
+  if (-not $safe) { $script:UpdSafeSince = $null; return }
+  if (-not $script:UpdSafeSince) { $script:UpdSafeSince = $now; return }
+  if (($now - $script:UpdSafeSince).TotalSeconds -lt 60) { return }
+  Install-Update
+}
+function Install-Update {
+  try {
+    $r = Get-Content $UpdReady -Raw | ConvertFrom-Json
+    $name = [IO.Path]::GetFileName([string]$r.file)
+    if ($name -notmatch '^RosaThermalGuard-Setup-(\d+\.\d+\.\d+)\.exe$' -or $matches[1] -ne [string]$r.version) { throw "bad installer name '$name'" }
+    if ([version][string]$r.version -le [version]$AppVersion) { throw "v$($r.version) is not newer than v$AppVersion" }
+    $exe = Join-Path $UpdDir $name
+    if (-not (Test-Path $exe)) { throw "$name is missing" }
+    # verify again right before running: hash vs ready.json AND vs the release's SHA256SUMS.txt, size, product
+    $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+    $line = Get-Content (Join-Path $UpdDir 'SHA256SUMS.txt') -ErrorAction Stop | Where-Object { $_ -match ('^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($name) + '\s*$') } | Select-Object -First 1
+    $want = if ($line) { ($line -split '\s+')[0].ToLower() } else { '' }
+    if ($hash -ne ([string]$r.sha256).ToLower() -or $hash -ne $want) { throw "SHA-256 check failed ($hash)" }
+    if ((Get-Item $exe).Length -ne [long]$r.size) { throw 'size changed' }
+    if (([string][Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductName).Trim() -ne 'Rosa Thermal Guard') { throw 'not the Rosa Thermal Guard installer' }
+  } catch {
+    Write-Log "update: NOT installing - $($_.Exception.Message); files removed"
+    Get-ChildItem $UpdDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    return
+  }
+  Write-Log "update: installing v$($r.version) (sha256 $hash verified) - restoring fans, power and GPU settings first"
+  Restore-All 'installing update'
+  @{ from = $AppVersion; to = [string]$r.version; at = (Get-Date).ToString('s') } | ConvertTo-Json | Set-Content $UpdDone -Encoding UTF8
+  Remove-Item $UpdReady -Force -ErrorAction SilentlyContinue   # one attempt per download
+  $cmd = "`"$exe`" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=`"$(Join-Path $DataDir 'update-install.log')`""
+  # started through WMI so it is not part of the scheduled task's job (the installer stops this app, then restarts the task)
+  $rc = (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }).ReturnValue
+  Write-Log "update: installer started (rc=$rc) - the app will restart when it finishes"
+}
+
+# ---- structured history for the report window (history\h-YYYYMMDD.csv every 5 s + history\events.jsonl) ----
+# CSV columns: unix time, CPU avg, GPU avg, CPU max, GPU max, CPU fan %, GPU fan %, CPU level, GPU throttled, fan level (0 auto, 1 curve, 2 = 100 %), game
+# kept 8 days (the report shows up to 7); events.jsonl is trimmed to 7 days; simulated/test data is never recorded
+$HistDir = Join-Path $DataDir 'history'
+$HIST_SEC = 5
+$script:HistAcc = $null; $script:HistAt = Get-Date; $script:HistDay = ''; $script:HistSim = $false
+$Inv = [Globalization.CultureInfo]::InvariantCulture
+function Hist-Prune {
+  try {
+    if (-not (Test-Path $HistDir)) { New-Item $HistDir -ItemType Directory -Force | Out-Null }
+    Get-ChildItem $HistDir -Filter 'h-*.csv' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-8) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $ev = Join-Path $HistDir 'events.jsonl'
+    if (Test-Path $ev) {
+      $cut = (Get-Date).AddDays(-7).ToString('s')
+      $lines = @([IO.File]::ReadAllLines($ev) | Where-Object { $_.Length -gt 10 -and $_.Substring(6, 19) -ge $cut })
+      if ($lines.Count -gt 20000) { $lines = $lines[($lines.Count - 20000)..($lines.Count - 1)] }
+      [IO.File]::WriteAllLines($ev, [string[]]$lines)
+    }
+  } catch {}
+}
+function Hist-Event([string]$e, $v = $null) {
+  if ($TestMode -or $script:HistSim) { return }
+  try {
+    if (-not (Test-Path $HistDir)) { New-Item $HistDir -ItemType Directory -Force | Out-Null }
+    $o = [ordered]@{ t = (Get-Date).ToString('s'); e = $e }; if ($v -ne $null) { $o.v = [string]$v }
+    Add-Content -Path (Join-Path $HistDir 'events.jsonl') -Value ($o | ConvertTo-Json -Compress) -Encoding UTF8
+  } catch {}
+}
+# events come from the log messages, so every place that logs an action also feeds the report
+function Hist-FromLog([string]$m) {
+  switch -Regex ($m) {
+    '^RosaThermalGuard started' { Hist-Event 'start'; break }
+    '^restore all \(guard exiting\)' { Hist-Event 'stop'; break }
+    '^CPU hot: ([\d.]+)' { Hist-Event 'cpuHot' ([int][double]$matches[1]); break }
+    '^CPU max processor state -> level 0' { Hist-Event 'cpuFull'; break }
+    '^GPU hot: ([\d.]+)' { Hist-Event 'gpuHot' ([int][double]$matches[1]); break }
+    '^GPU cool for' { Hist-Event 'gpuCool'; break }
+    '^fans: controlled from [\d.]+% -> target ([\d.]+)%' { Hist-Event 'fanTake' $matches[1]; break }
+    '^fans: critical' { Hist-Event 'fanCrit'; break }
+    '^fan mode restored' { Hist-Event 'fanRelease'; break }
+    '^fan watchdog:' { Hist-Event 'failsafe'; break }
+    '^game mode ON' { Hist-Event 'gameOn' $script:GameName; break }
+    '^game mode OFF' { Hist-Event 'gameOff'; break }
+    '^priority (\S+) \(pid \d+\) \S+ -> BelowNormal' { Hist-Event 'prio' $matches[1]; break }
+    '^update: now running v(\S+)' { Hist-Event 'update' $matches[1]; break }
+    '^resume/stall detected' { Hist-Event 'resume'; break }
+  }
+}
+function Hist-Sample($now, $cpu, $gpu) {
+  if ($TestMode -or $script:HistSim) { $script:HistAcc = $null; $script:HistAt = $now; return }
+  $a = $script:HistAcc
+  if (-not $a) { $a = @{ c = 0.0; cn = 0; g = 0.0; gn = 0; cm = $null; gm = $null; f1 = 0.0; f2 = 0.0; fn = 0; lvl = 0; gt = $false; fan = 0; game = $false }; $script:HistAcc = $a }
+  if ($cpu -ne $null) { $a.c += $cpu; $a.cn++; if ($a.cm -eq $null -or $cpu -gt $a.cm) { $a.cm = $cpu } }
+  if ($gpu -ne $null) { $a.g += $gpu; $a.gn++; if ($a.gm -eq $null -or $gpu -gt $a.gm) { $a.gm = $gpu } }
+  if ($FanInfo) { $a.f1 += 100.0 * [Math]::Min(1.0, [double]$FanInfo.Rpm1 / [Math]::Max(1000.0, [double]$FAN_MAXRPM1)); $a.f2 += 100.0 * [Math]::Min(1.0, [double]$FanInfo.Rpm2 / [Math]::Max(1000.0, [double]$FAN_MAXRPM2)); $a.fn++ }
+  $a.lvl = [Math]::Max($a.lvl, [int]$CpuLevel); $a.gt = $a.gt -or [bool]$GpuThrottled
+  if ($FanBoosted) { $a.fan = [Math]::Max($a.fan, $(if ([int]$FanLevel -ge 2) { 2 } else { 1 })) }
+  $a.game = $a.game -or [bool]$GameMode
+  if (($now - $script:HistAt).TotalSeconds -lt $HIST_SEC - 0.05) { return }
+  $script:HistAt = $now; $script:HistAcc = $null
+  $day = $now.ToString('yyyyMMdd'); if ($day -ne $script:HistDay) { $script:HistDay = $day; Hist-Prune }
+  $f = { param($v) if ($v -eq $null) { '' } else { ([double]$v).ToString('0.#', $Inv) } }
+  $line = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}' -f [long]([DateTimeOffset]$now).ToUnixTimeSeconds(),
+    (& $f $(if ($a.cn) { $a.c / $a.cn })), (& $f $(if ($a.gn) { $a.g / $a.gn })), (& $f $a.cm), (& $f $a.gm),
+    (& $f $(if ($a.fn) { $a.f1 / $a.fn })), (& $f $(if ($a.fn) { $a.f2 / $a.fn })), $a.lvl, $(if ($a.gt) { 1 } else { 0 }), $a.fan, $(if ($a.game) { 1 } else { 0 })
+  try { Add-Content -Path (Join-Path $HistDir "h-$day.csv") -Value $line -Encoding ASCII } catch {}
+}
 
 # ---- logging ----
+# guard.log is appended line by line (open/append/close) by the guard, the tray and the updater. Rotation renames it
+# (the next line of any writer starts a fresh file), gzips it to guard.1.log.gz and shifts older archives; a named mutex
+# keeps two rotations from overlapping. Bounded by keepFiles, keepDays and totalMaxMB.
+function Rotate-Log([switch]$Force) {
+  $m = $null
+  try {
+    $m = New-Object Threading.Mutex($false, 'Global\RosaThermalGuardLogRotate')
+    if (-not $m.WaitOne(3000)) { $m.Dispose(); return }
+  } catch { return }
+  try {
+    $arc = { param($n) Join-Path $DataDir ("guard.{0}.log.gz" -f $n) }
+    if ((Test-Path $LogFile) -and ($Force -or (Get-Item $LogFile).Length -ge $LOG_MAX)) {
+      $tmp = Join-Path $DataDir 'guard.rotating.log'
+      if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+      $moved = $false
+      for ($i = 0; $i -lt 10 -and -not $moved; $i++) { try { [IO.File]::Move($LogFile, $tmp); $moved = $true } catch { Start-Sleep -Milliseconds 50 } }
+      if ($moved) {
+        $last = & $arc $LOG_KEEP; if (Test-Path $last) { Remove-Item $last -Force -ErrorAction SilentlyContinue }
+        for ($n = $LOG_KEEP - 1; $n -ge 1; $n--) { $f = & $arc $n; if (Test-Path $f) { Move-Item $f (& $arc ($n + 1)) -Force } }
+        $in = [IO.File]::OpenRead($tmp)
+        try { $out = [IO.File]::Create((& $arc 1)); try { $gz = New-Object IO.Compression.GZipStream($out, [IO.Compression.CompressionMode]::Compress); try { $in.CopyTo($gz) } finally { $gz.Dispose() } } finally { $out.Dispose() } } finally { $in.Dispose() }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+      }
+    }
+    # retention: age, count, total size (oldest first)
+    $all = @(Get-ChildItem $DataDir -Filter 'guard.*.log.gz' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
+    foreach ($f in $all) { if ($f.LastWriteTime -lt (Get-Date).AddDays(-$LOG_DAYS) -or ($f.Name -match '^guard\.(\d+)\.log\.gz$' -and [int]$matches[1] -gt $LOG_KEEP)) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue } }
+    $all = @(Get-ChildItem $DataDir -Filter 'guard.*.log.gz' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
+    $cur = $(if (Test-Path $LogFile) { (Get-Item $LogFile).Length } else { 0 })
+    $tot = $cur + ($all | Measure-Object Length -Sum).Sum
+    foreach ($f in $all) { if ($tot -le $LOG_TOTAL) { break }; $tot -= $f.Length; Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue }
+    # other files that could grow: legacy guard.log.1, the update installer's log
+    foreach ($x in 'guard.log.1', 'update-install.log') { $fx = Join-Path $DataDir $x; if ((Test-Path $fx) -and ($x -eq 'guard.log.1' -or (Get-Item $fx).Length -gt 1MB)) { Remove-Item $fx -Force -ErrorAction SilentlyContinue } }
+  } catch {} finally { try { $m.ReleaseMutex() } catch {}; $m.Dispose() }
+}
 function Write-Log([string]$msg) {
   try {
-    if ((Test-Path $LogFile) -and ((Get-Item $LogFile).Length -gt $MaxLogBytes)) {
-      Move-Item $LogFile "$LogFile.1" -Force
-    }
+    if (((Get-Date) - $script:LogCheckAt).TotalSeconds -ge 30) { $script:LogCheckAt = Get-Date; Rotate-Log }
     $line = '{0} {1}{2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), ($(if ($TestMode) { '[TEST] ' } else { '' })), $msg
-    Add-Content -Path $LogFile -Value $line -Encoding UTF8
+    for ($i = 0; $i -lt 4; $i++) { try { Add-Content -Path $LogFile -Value $line -Encoding UTF8 -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 40 } }   # the tray and the updater write too
     if ($TestMode -or $Once) { Write-Host $line }
+    if (-not $TestMode -and -not $Once -and -not $Restore) { Hist-FromLog $msg }
   } catch {}
 }
 
@@ -156,6 +365,10 @@ function Lower-Priority($procs, [string]$why) {
   foreach ($p in $procs) {
     try {
       if ($script:Reniced.ContainsKey($p.Id)) { continue }
+      if ($GM_PROTECT -and $GameMode -and $script:GamePids.ContainsKey($p.Id)) {
+        if (-not $script:GameProtectLogged) { Write-Log "priority: $($p.ProcessName) (pid $($p.Id)) is the running game - not lowered [$why]"; $script:GameProtectLogged = $true }
+        continue
+      }
       $orig = $p.PriorityClass
       if ($orig -eq 'Idle' -or $orig -eq 'BelowNormal') { continue }
       $p.PriorityClass = 'BelowNormal'
@@ -282,8 +495,8 @@ function Restore-Gpu {
 $cFan = CfgVal $Cfg 'fanBoost' $null
 $FAN_ON = [bool](CfgVal $cFan 'enabled' $true)
 $FAN_DUTY = [int](CfgVal $cFan 'maxDuty' 229)   # 229 = 100 % duty on the GIGABYTE EC
-function Get-FanCurve([string]$name, $def) {
-  $src = CfgVal $cFan $name $null
+function Get-FanCurve([string]$name, $def, $from = $cFan) {
+  $src = CfgVal $from $name $null
   $pts = New-Object Collections.Generic.List[double[]]
   if ($src) { foreach ($p in $src) { try { $pts.Add([double[]]@([double]$p[0], [Math]::Max(0.0, [Math]::Min(100.0, [double]$p[1])))) } catch {} } }
   if ($pts.Count -lt 2) { $pts.Clear(); foreach ($p in $def) { $pts.Add([double[]]@([double]$p[0], [double]$p[1])) } }
@@ -306,7 +519,57 @@ $FAN_DOWN_STEP = [Math]::Max(0.5, [double](CfgVal $cFan 'rampDownStepPercent' 2)
 $FAN_RAMP_SEC = [Math]::Max(1.0, [double](CfgVal $cFan 'rampIntervalSeconds' 2))
 $FAN_HB_FALLBACK = [double](CfgVal $cFan 'handBackFallbackPercent' 25)
 $FAN_SMOOTH = [double](CfgVal $cFan 'smoothingSeconds' 12)
-$FAN_CRIT_N = [Math]::Max(1, [int](CfgVal $cFan 'criticalSamples' 3))   # raw samples in a row at/above critical before 100 %          # EMA time constant for the temperatures the fan logic uses
+$FAN_CRIT_SEC = [Math]::Max(0.0, [double](CfgVal $cFan 'criticalSeconds' 4))   # critical heat must last this long before 100 %
+# ---- game mode: earlier, steeper fan curve and a protected game process while a game is running ----
+$cGame = CfgVal $cFan 'gameMode' $null
+$GM_ON = [bool](CfgVal $cGame 'enabled' $true)
+$GM_GPU_UTIL = [double](CfgVal $cGame 'gpuUtilPercent' 60)       # GPU load that counts as "busy"
+$GM_ENTER = [int](CfgVal $cGame 'enterSeconds' 10)               # game signs for this long -> game mode on
+$GM_EXIT = [int](CfgVal $cGame 'exitSeconds' 60)                 # no game signs for this long -> game mode off
+$GM_FULLSCREEN = [bool](CfgVal $cGame 'detectFullscreen' $true)
+$GM_PROTECT = [bool](CfgVal $cGame 'protectGame' $true)          # never lower the game's priority
+$GM_UP_STEP = [Math]::Max(0.5, [double](CfgVal $cGame 'rampUpStepPercent' 3))
+$GM_CURVE_CPU = Get-FanCurve 'curveCpu' @(@(65, 45), @(71, 54), @(77, 65), @(83, 77), @(89, 86), @(93, 90)) $cGame   # from Rosa's gaming log: CPU p10 73 / p50 86 C in games, 60-72 C at light load
+$GM_CURVE_GPU = Get-FanCurve 'curveGpu' @(@(60, 45), @(66, 54), @(72, 64), @(78, 74), @(83, 82), @(87, 88)) $cGame   # GPU p25 64 / p50 77 C in games, idle p90 ~51 C
+$GM_EXES = @(@(CfgVal $cGame 'exeList' @('cs2', 'valorant-win64-shipping', 'fortniteclient-win64-shipping', 'r5apex', 'eldenring', 'cyberpunk2077', 'gta5', 'gta5_enhanced', 'rdr2', 'bg3', 'bg3_dx11', 'fc25', 'fc26', 'bf2042', 'overwatch', 'dota2', 'league of legends', 'rocketleague', 'starfield', 'witcher3', 'helldivers2', 'minecraft.windows')) | ForEach-Object { ([string]$_ -replace '\.exe$', '').ToLower() })
+$GM_EXCL = @(@(CfgVal $cGame 'excludeExes' @('explorer', 'shellexperiencehost', 'startmenuexperiencehost', 'searchhost', 'lockapp', 'textinputhost', 'applicationframehost', 'msedge', 'chrome', 'firefox', 'brave', 'opera', 'vlc', 'mpc-hc64', 'potplayermini64', 'ms-teams', 'teams', 'zoom', 'powerpnt')) | ForEach-Object { ([string]$_ -replace '\.exe$', '').ToLower() })
+$SimGameFile = Join-Path $Root 'simgame.txt'     # dev test only (allowSimulateFile): name of a process to treat as the game
+$script:GameMode = $false; $script:GameName = $null; $script:GamePids = @{}
+if (-not ('RtgFg' -as [type])) {
+  try {
+    Add-Type -ErrorAction Stop -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class RtgFg {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint f);
+  [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
+  [DllImport("user32.dll")] static extern IntPtr GetShellWindow();
+  [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+  [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+  [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+  public static bool IsFullscreen(IntPtr h) {
+    if (h == IntPtr.Zero || h == GetShellWindow() || h == GetDesktopWindow()) return false;
+    RECT r; if (!GetWindowRect(h, out r)) return false;
+    MONITORINFO mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+    if (!GetMonitorInfo(MonitorFromWindow(h, 2), ref mi)) return false;
+    return r.L <= mi.rcMonitor.L && r.T <= mi.rcMonitor.T && r.R >= mi.rcMonitor.R && r.B >= mi.rcMonitor.B;
+  }
+}
+"@
+  } catch { Write-Log "game mode: foreground detection unavailable ($($_.Exception.Message))" }
+}
+function Get-FgInfo {
+  try {
+    if (-not ('RtgFg' -as [type])) { return $null }
+    $h = [RtgFg]::GetForegroundWindow(); if ($h -eq [IntPtr]::Zero) { return $null }
+    [uint32]$fp = 0; [void][RtgFg]::GetWindowThreadProcessId($h, [ref]$fp)
+    if ($fp -eq 0 -or $fp -eq $PID) { return $null }
+    $p = Get-Process -Id $fp -ErrorAction Stop
+    return @{ Pid = [int]$fp; Name = $p.ProcessName; Full = [RtgFg]::IsFullscreen($h) }
+  } catch { return $null }
+}
 $FAN_HB_MARGIN = [double](CfgVal $cFan 'handBackMarginPercent' 4)
 $FAN_MAXRPM1 = [int](CfgVal $cFan 'maxRpmCpuFan' 6400)          # RPM at 100 % duty (AORUS Master 16: ~6,380 / ~6,850)
 $FAN_MAXRPM2 = [int](CfgVal $cFan 'maxRpmGpuFan' 6900)
@@ -317,13 +580,18 @@ $script:FanLevel = 0          # 0 = auto (firmware), 1 = our curve, 2 = 100 % (c
 $script:FanPct = $null; $script:FanTarget = $null; $script:FanRampLast = [datetime]::MinValue
 $script:FanSwitchAt = [datetime]::MinValue; $script:FanRaiseAt = [datetime]::MinValue; $script:FanLevelSince = $null
 $script:FanAuto = @{}; $script:FanAutoSaved = Get-Date; $script:FanLastCpu = $null; $script:FanLastGpu = $null
+$script:FanGetI = $null; $script:FanSetI = $null
 function Fan-Get([string]$m) {
-  $i = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Get -ErrorAction Stop
-  return (Invoke-CimMethod -InputObject $i -MethodName $m -ErrorAction Stop).Data
+  # the CIM instance is reused (cheap at a 1 s poll); looked up again once if a call fails
+  if (-not $script:FanGetI) { $script:FanGetI = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Get -ErrorAction Stop }
+  try { return (Invoke-CimMethod -InputObject $script:FanGetI -MethodName $m -ErrorAction Stop).Data }
+  catch { $script:FanGetI = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Get -ErrorAction Stop; return (Invoke-CimMethod -InputObject $script:FanGetI -MethodName $m -ErrorAction Stop).Data }
 }
 function Fan-Set([string]$m, [int]$v) {
-  $i = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Set -ErrorAction Stop
-  [void](Invoke-CimMethod -InputObject $i -MethodName $m -Arguments @{ Data = [byte]$v } -ErrorAction Stop)
+  $script:FanModeAt = [datetime]::MinValue   # any write: re-read the mode registers on the next poll
+  if (-not $script:FanSetI) { $script:FanSetI = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Set -ErrorAction Stop }
+  try { [void](Invoke-CimMethod -InputObject $script:FanSetI -MethodName $m -Arguments @{ Data = [byte]$v } -ErrorAction Stop) }
+  catch { $script:FanSetI = Get-CimInstance -Namespace root\WMI -ClassName GB_WMIACPI_Set -ErrorAction Stop; [void](Invoke-CimMethod -InputObject $script:FanSetI -MethodName $m -Arguments @{ Data = [byte]$v } -ErrorAction Stop) }
 }
 function Fan-Rpm([string]$m) { $v = [int](Fan-Get $m); return ((($v -band 0xFF) -shl 8) -bor ($v -shr 8)) }   # the EC returns RPM byte-swapped
 function Get-FanMode {
@@ -340,7 +608,8 @@ function Curve-Pct($pts, $t) {
 }
 function Fan-Demand($cpu, $gpu, [double]$off = 0) {
   $c = if ($cpu -ne $null) { $cpu - $off } else { $null }; $g = if ($gpu -ne $null) { $gpu - $off } else { $null }
-  return [Math]::Max((Curve-Pct $FAN_CURVE_CPU $c), (Curve-Pct $FAN_CURVE_GPU $g))
+  $kc = if ($GameMode) { $GM_CURVE_CPU } else { $FAN_CURVE_CPU }; $kg = if ($GameMode) { $GM_CURVE_GPU } else { $FAN_CURVE_GPU }
+  return [Math]::Max((Curve-Pct $kc $c), (Curve-Pct $kg $g))
 }
 function Fan-Critical($cpu, $gpu) { ($cpu -ne $null -and $cpu -ge $FAN_FULL_CPU) -or ($gpu -ne $null -and $gpu -ge $FAN_FULL_GPU) }
 function Fan-ObservedPct {
@@ -377,10 +646,14 @@ function Init-Fan {
       $r1, $r2, $m.Fixed, $m.Step, $m.Auto, (& $cv $FAN_CURVE_CPU), (& $cv $FAN_CURVE_GPU), $FAN_FULL_CPU, $FAN_FULL_GPU, $FAN_UP_STEP, $FAN_DOWN_STEP, $FAN_RAMP_SEC, $FAN_HYST, $FAN_MIN_HOLD, $FAN_MIN_SWITCH, $FAN_REL_CPU, $FAN_REL_GPU, $FAN_REL_SEC, $FanAuto.Count)
   } catch { Write-Log 'fan control: GIGABYTE ACPI-WMI not available on this PC - fan boost off' }
 }
-function Read-Fan {
+$script:FanModeCache = $null; $script:FanModeAt = [datetime]::MinValue; $script:FanModeFresh = $false
+function Read-Fan([switch]$Full) {
   if (-not $FanOk) { return }
   try {
-    $m = Get-FanMode
+    # RPM is read every poll; the 4-5 mode registers only every 5 s (or right after we changed something) - keeps WMI traffic low at a 1 s poll
+    $script:FanModeFresh = $false
+    if ($Full -or -not $script:FanModeCache -or ((Get-Date) - $script:FanModeAt).TotalSeconds -ge 5) { $script:FanModeCache = Get-FanMode; $script:FanModeAt = Get-Date; $script:FanModeFresh = $true }
+    $m = $script:FanModeCache
     $mode = if ($m.Fixed -eq 1 -and $FanBoosted) { $(if ($m.Speed -ge $FAN_DUTY - 2) { 'max' } else { 'boost' }) } elseif ($m.Fixed -eq 1 -and $m.Speed -ge $FAN_DUTY - 2) { 'max' } elseif ($m.Fixed -eq 1) { 'fixed' } elseif ($m.Auto -eq 1) { 'auto' } else { 'normal' }
     $script:FanInfo = @{ Rpm1 = (Fan-Rpm 'getRpm1'); Rpm2 = (Fan-Rpm 'getRpm2'); Mode = $mode; Fixed = $m.Fixed; Speed = $m.Speed }
     $script:FanErr = 0
@@ -425,7 +698,7 @@ function Fan-Step {
   if (-not $FanBoosted -or $FanPct -eq $null -or $FanTarget -eq $null) { return }
   if ([Math]::Abs($FanPct - $FanTarget) -lt 0.25) { return }
   if (((Get-Date) - $FanRampLast).TotalSeconds -lt $FAN_RAMP_SEC - 0.3) { return }
-  $n = if ($FanPct -lt $FanTarget) { [Math]::Min($FanTarget, $FanPct + $FAN_UP_STEP) } else { [Math]::Max($FanTarget, $FanPct - $FAN_DOWN_STEP) }
+  $n = if ($FanPct -lt $FanTarget) { [Math]::Min($FanTarget, $FanPct + $(if ($GameMode) { $GM_UP_STEP } else { $FAN_UP_STEP })) } else { [Math]::Max($FanTarget, $FanPct - $FAN_DOWN_STEP) }
   try { Fan-Apply $n; $script:FanRampLast = Get-Date; $script:FanLevel = $(if ($n -ge 99.5) { 2 } else { 1 }) } catch { Fan-Fault "step: $($_.Exception.Message)" }
 }
 function Restore-Fan([string]$why, [switch]$Abrupt) {
@@ -485,12 +758,48 @@ function Open-Sensors {
   $script:HasNvidia = [bool]($c.Hardware | Where-Object { $_.HardwareType -eq 'GpuNvidia' })
   Write-Log ("sensors: " + (($c.Hardware | ForEach-Object { "$($_.HardwareType)=$($_.Name)" }) -join '; '))
 }
+function Find-TempSensors {
+  # walk all sensors once and keep only the ones Read-Temps needs (CPU package/core max, GPU core/hot spot, GPU core load)
+  $list = New-Object Collections.Generic.List[object]
+  foreach ($h in $Computer.Hardware) {
+    $h.Update()
+    foreach ($hw in @($h) + @($h.SubHardware)) {
+      if ($hw -ne $h) { $hw.Update() }
+      foreach ($s in $hw.Sensors) {
+        $k = $null
+        if ($h.HardwareType -eq 'Cpu' -and $s.SensorType -eq 'Temperature' -and ($s.Name -eq 'CPU Package' -or $s.Name -eq 'Core Max')) { $k = 'C' }
+        elseif ($h.HardwareType -eq 'GpuNvidia' -or $h.HardwareType -eq 'GpuAmd') {
+          if ($s.SensorType -eq 'Temperature' -and ($s.Name -eq 'GPU Core' -or $s.Name -eq 'GPU Hot Spot')) { $k = 'G' }
+          elseif ($s.SensorType -eq 'Load' -and $s.Name -eq 'GPU Core') { $k = 'L' }
+        }
+        if ($k) { $list.Add(@{ K = $k; S = $s }) }
+      }
+    }
+  }
+  $script:TempSensors = $list
+  $script:TempHw = @($Computer.Hardware | Where-Object { $_.HardwareType -eq 'Cpu' -or $_.HardwareType -eq 'GpuNvidia' -or $_.HardwareType -eq 'GpuAmd' })
+  $script:TempNullN = 0
+}
 function Read-Temps {
-  $cpu = $null; $gpu = $null
+  # fast path (every poll): update only the CPU/GPU hardware and read the cached sensors
+  if ($script:TempSensors -and $script:TempSensors.Count -gt 0) {
+    foreach ($h in $script:TempHw) { $h.Update(); foreach ($sh in $h.SubHardware) { $sh.Update() } }
+    $cpu = $null; $gpu = $null; $gl = $null
+    foreach ($e in $script:TempSensors) {
+      $v = $e.S.Value; if ($v -eq $null) { continue }; $v = [double]$v
+      switch ($e.K) { 'C' { if ($cpu -eq $null -or $v -gt $cpu) { $cpu = $v } } 'G' { if ($gpu -eq $null -or $v -gt $gpu) { $gpu = $v } } 'L' { if ($gl -eq $null -or $v -gt $gl) { $gl = $v } } }
+    }
+    if ($cpu -ne $null) { $script:TempNullN = 0; return @{ Cpu = $cpu; Gpu = $gpu; GpuLoad = $gl } }
+    if (++$script:TempNullN -lt 5) { return @{ Cpu = $cpu; Gpu = $gpu; GpuLoad = $gl } }
+    $script:TempSensors = $null   # CPU sensor gone for 5 polls: rescan below
+  }
+  try { Find-TempSensors } catch {}
+  $cpu = $null; $gpu = $null; $gl = $null
   foreach ($h in $Computer.Hardware) {
     $h.Update()
     $sens = @($h.Sensors) + @($h.SubHardware | ForEach-Object { $_.Update(); $_.Sensors })
     foreach ($s in $sens) {
+      if ($s.SensorType -eq 'Load' -and $s.Value -ne $null -and $s.Name -eq 'GPU Core' -and ($h.HardwareType -eq 'GpuNvidia' -or $h.HardwareType -eq 'GpuAmd')) { if ($gl -eq $null -or [double]$s.Value -gt $gl) { $gl = [double]$s.Value } }
       if ($s.SensorType -ne 'Temperature' -or $s.Value -eq $null -or $s.Name -like '*Distance*') { continue }
       $v = [double]$s.Value
       if ($h.HardwareType -eq 'Cpu' -and ($s.Name -eq 'CPU Package' -or $s.Name -eq 'Core Max')) { if ($cpu -eq $null -or $v -gt $cpu) { $cpu = $v } }
@@ -499,7 +808,7 @@ function Read-Temps {
       }
     }
   }
-  return @{ Cpu = $cpu; Gpu = $gpu }
+  return @{ Cpu = $cpu; Gpu = $gpu; GpuLoad = $gl }
 }
 
 # ================= main =================
@@ -537,11 +846,14 @@ if ($TestMode) {
 $coolSince = $null; $gpuCoolSince = $null; $lastStep = [datetime]::MinValue; $lastGpuStep = [datetime]::MinValue; $lastStepTemp = 0
 $restoreHold = $COOL_SECONDS; $lastFullRestore = $null; $wasPaused = $false
 $lastInfo = [datetime]::MinValue; $nullSince = $null; $lastRescan = Get-Date
-$fanRelSince = $null; $lastFanFix = [datetime]::MinValue; $fanCpuS = $null; $fanGpuS = $null; $fanCritN = 0; $fanSN = 0; $cpuHotN = 0; $gpuHotN = 0; $lastLoopAt = $null
+$fanRelSince = $null; $lastFanFix = [datetime]::MinValue; $fanCpuS = $null; $fanGpuS = $null; $fanCritN = 0; $fanSN = 0; $cpuHotN = 0; $gpuHotN = 0; $cpuHotSince = $null; $gpuHotSince = $null; $fanCritSince = $null; $fanEmaAt = $null; $fanSStart = $null; $lastLoopAt = $null; $gmCandSince = $null; $gmIdleSince = $null; $gmScanAt = [datetime]::MinValue; $gmListed = @(); $gmNamed = @(); $gmNvAt = [datetime]::MinValue; $gmNvLoad = $null
 Write-Log "RosaThermalGuard started (admin=$isAdmin, poll=${PollSeconds}s, CPU hot=$CPU_HOT crit=$CPU_CRIT cool=$CPU_COOL, GPU hot=$GPU_HOT cool=$GPU_COOL)"
 $exitCode = 0
 try {
+  Update-Startup
+  $perfSw = New-Object Diagnostics.Stopwatch; $perfN = 0; $perfMs = 0.0; $perfMax = 0.0; $perfAt = Get-Date; $perfCpu0 = (Get-Process -Id $PID).TotalProcessorTime.TotalSeconds
   while ($true) {
+    $loopT0 = Get-Date; $perfSw.Restart()
     $t = Read-Temps
     $real = "real CPU=$($t.Cpu) GPU=$($t.Gpu)"
     $simActive = $false
@@ -559,7 +871,7 @@ try {
     $now = Get-Date
     if ($lastLoopAt -and ($now - $lastLoopAt).TotalSeconds -gt [Math]::Max(30, 5 * $PollSeconds)) {
       Write-Log ("resume/stall detected ({0:N0}s since last check) - re-reading fans and temperatures" -f ($now - $lastLoopAt).TotalSeconds)
-      $fanCpuS = $null; $fanGpuS = $null; $fanCritN = 0; $fanSN = 0; $cpuHotN = 0; $gpuHotN = 0; $lastLoopAt = $null; $lastFanFix = [datetime]::MinValue
+      $fanCpuS = $null; $fanGpuS = $null; $fanCritN = 0; $fanSN = 0; $cpuHotN = 0; $gpuHotN = 0; $cpuHotSince = $null; $gpuHotSince = $null; $fanCritSince = $null; $fanEmaAt = $null; $fanSStart = $null; $lastLoopAt = $null; $gmCandSince = $null; $gmIdleSince = $null; $gmScanAt = [datetime]::MinValue; $gmListed = @(); $gmNamed = @(); $gmNvAt = [datetime]::MinValue; $gmNvLoad = $null; $lastFanFix = [datetime]::MinValue
     }
     $lastLoopAt = $now
     $cpu = $t.Cpu; $gpu = $t.Gpu
@@ -576,14 +888,14 @@ try {
     if ($wasPaused -and -not $paused) { Write-Log 'guard resumed' }
     $wasPaused = $paused
 
-    $cpuHotN = $(if ($cpu -ne $null -and $cpu -ge $CPU_HOT) { $cpuHotN + 1 } else { 0 })
-    $gpuHotN = $(if ($gpu -ne $null -and $gpu -ge $GPU_HOT) { $gpuHotN + 1 } else { 0 })
+    $cpuHotSince = $(if ($cpu -ne $null -and $cpu -ge $CPU_HOT) { if ($cpuHotSince) { $cpuHotSince } else { $now } } else { $null })
+    $gpuHotSince = $(if ($gpu -ne $null -and $gpu -ge $GPU_HOT) { if ($gpuHotSince) { $gpuHotSince } else { $now } } else { $null })
     if ($paused) { $coolSince = $null }
     elseif ($cpu -eq $null) {
       if (-not $nullSince) { $nullSince = $now; Write-Log 'CPU temperature not available (admin/PawnIO?)' }
     } else {
       $nullSince = $null
-      if ($cpu -ge $CPU_HOT -and $cpuHotN -lt $CPU_HOT_N) { if ($cpuHotN -eq 1) { Write-Log "CPU spike $cpu C ignored (needs $CPU_HOT_N samples in a row)" } }
+      if ($cpu -ge $CPU_HOT -and ($now - $cpuHotSince).TotalSeconds -lt $CPU_HOT_SEC) { if ($cpuHotSince -eq $now) { Write-Log "CPU spike $cpu C - waiting ${CPU_HOT_SEC}s to see if it lasts" } }
       elseif ($cpu -ge $CPU_HOT) {
         $coolSince = $null
         $elapsed = ($now - $lastStep).TotalSeconds
@@ -602,7 +914,7 @@ try {
           Apply-CpuLevel ($CpuLevel + 1); $lastStep = $now; $lastStepTemp = $cpu
           if ($first) { Show-Notice 'nCpuHot' ([int]$cpu) }
         }
-        if ($cpu -ge $CPU_CRIT) { Lower-Priority (Get-TopCpuProcesses $TOP_N) "CPU $cpu C" }
+        if ($cpu -ge $CPU_CRIT -and ($now - $script:TopScanAt).TotalSeconds -ge 5) { $script:TopScanAt = $now; Lower-Priority (Get-TopCpuProcesses $TOP_N) "CPU $cpu C" }   # the scan samples for 1 s: at most every 5 s
       } elseif ($cpu -lt $CPU_COOL -and ($CpuLevel -gt 0 -or $Reniced.Count -gt 0)) {
         if (-not $coolSince) { $coolSince = $now }
         elseif (($now - $coolSince).TotalSeconds -ge $(if ($CpuLevel -eq 1) { $restoreHold } else { $COOL_SECONDS })) {
@@ -616,7 +928,7 @@ try {
     }
 
     if (-not $paused -and $gpu -ne $null) {
-      if ($gpu -ge $GPU_HOT -and $gpuHotN -lt $GPU_HOT_N) { }
+      if ($gpu -ge $GPU_HOT -and ($now - $gpuHotSince).TotalSeconds -lt $GPU_HOT_SEC) { }
       elseif ($gpu -ge $GPU_HOT) {
         $gpuCoolSince = $null
         if (($now - $lastGpuStep).TotalSeconds -ge $STEP_MIN_SECONDS -or -not $GpuThrottled) {
@@ -634,35 +946,75 @@ try {
       }
     }
 
+    # game mode: sustained GPU load + a fullscreen or listed game in front (or a listed game running), with hysteresis
+    if ($GM_ON -and -not $paused) {
+      $fgi = Get-FgInfo
+      $gl = $t.GpuLoad
+      if ($gl -eq $null -and $HasNvidia) {
+        if (($now - $gmNvAt).TotalSeconds -ge 10) { $gmNvAt = $now; $r = Invoke-NvSmi '--query-gpu=utilization.gpu --format=csv,noheader,nounits' 4000; $gmNvLoad = $(if ($r -and $r.Code -eq 0) { ToNum (($r.Out -split "`n")[0]) } else { $null }) }
+        $gl = $gmNvLoad
+      }
+      if (($now - $gmScanAt).TotalSeconds -ge 5) { $gmScanAt = $now; $gmListed = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $GM_EXES -contains $_.ProcessName.ToLower() }); $gmNamed = $(if ($GameName) { @(Get-Process -Name $GameName -ErrorAction SilentlyContinue) } else { @() }) }
+      $simGame = $null
+      if ($ALLOW_SIM -and (Test-Path $SimGameFile) -and ((Get-Date) - (Get-Item $SimGameFile).LastWriteTime).TotalMinutes -lt 5) { $simGame = ([string](Get-Content $SimGameFile -Raw)).Trim().ToLower() }
+      $fgName = if ($fgi) { $fgi.Name.ToLower() } else { '' }
+      $listedFg = $fgName -and ($GM_EXES -contains $fgName)
+      $fullFg = $GM_FULLSCREEN -and $fgi -and $fgi.Full -and ($GM_EXCL -notcontains $fgName)
+      $busy = $gl -ne $null -and $gl -ge $GM_GPU_UTIL
+      $cand = [bool]$simGame -or $listedFg -or ($busy -and ($fullFg -or $gmListed.Count -gt 0))
+      if ($cand) { $gmIdleSince = $null; if (-not $gmCandSince) { $gmCandSince = $now } } else { $gmCandSince = $null; if (-not $gmIdleSince) { $gmIdleSince = $now } }
+      if (-not $GameMode -and $gmCandSince -and ($now - $gmCandSince).TotalSeconds -ge $GM_ENTER) {
+        $why = if ($simGame) { "simulated: $simGame" } elseif ($listedFg) { "listed game in front: $($fgi.Name)" } elseif ($fullFg) { "GPU $([int]$gl)% + fullscreen $($fgi.Name)" } else { "GPU $([int]$gl)% + listed game running: $($gmListed[0].ProcessName)" }
+        $script:GameMode = $true; $script:GameProtectLogged = $false
+        $script:GameName = $(if ($simGame) { $simGame } elseif ($listedFg -or $fullFg) { $fgi.Name } elseif ($gmListed.Count) { $gmListed[0].ProcessName } else { $null })
+        Write-Log "game mode ON ($why) - earlier fan curve, the game is protected from priority changes"
+      } elseif ($GameMode -and $gmIdleSince -and ($now - $gmIdleSince).TotalSeconds -ge $GM_EXIT) {
+        Write-Log "game mode OFF (no game activity for ${GM_EXIT}s) - back to the normal fan curve"
+        $script:GameMode = $false; $script:GameName = $null; $script:GamePids = @{}
+      }
+      if ($GameMode) {
+        $gp = @{}
+        if ($fgi -and ($listedFg -or $fullFg -or $fgName -eq ([string]$GameName).ToLower())) { $gp[[int]$fgi.Pid] = $fgi.Name }
+        foreach ($p in $gmListed) { $gp[$p.Id] = $p.ProcessName }
+        foreach ($p in @($gmNamed)) { $gp[$p.Id] = $p.ProcessName }
+        $script:GamePids = $gp
+        foreach ($k in @($Reniced.Keys)) {
+          if ($gp.ContainsKey($k)) { try { $pp = Get-Process -Id $k -ErrorAction Stop; $pp.PriorityClass = $Reniced[$k].Orig; Write-Log "priority $($pp.ProcessName) (pid $k) put back to $($Reniced[$k].Orig) - it is the running game" } catch {}; $script:Reniced.Remove($k) }
+        }
+      }
+    }
+
     # fans: first line of defence, before any throttling (curve starts well below the throttle points)
     if ($FanOk) {
       Read-Fan
       if ($cpu -ne $null) { $script:FanLastCpu = $cpu }; if ($gpu -ne $null) { $script:FanLastGpu = $gpu }   # raw, for the exit soft landing
       if ($paused) { $fanRelSince = $null }
       # the fan logic works on smoothed temperatures (EMA, ~fanSmoothingSeconds) so single-sample spikes don't move the fans
-      $fa = [Math]::Min(1.0, $PollSeconds / [Math]::Max(1.0, $FAN_SMOOTH))
-      $fanSN = $(if ($fanCpuS -eq $null -and $fanGpuS -eq $null) { 1 } else { $fanSN + 1 })
+      $fdt = if ($fanEmaAt) { [Math]::Min(10.0, ($now - $fanEmaAt).TotalSeconds) } else { $PollSeconds }; $fanEmaAt = $now
+      $fa = [Math]::Min(1.0, $fdt / [Math]::Max(1.0, $FAN_SMOOTH))   # EMA weight from elapsed time, so the ~12 s window does not depend on the poll rate
+      if ($fanCpuS -eq $null -and $fanGpuS -eq $null) { $fanSStart = $now }
+      $fanWarm = $fanSStart -and ($now - $fanSStart).TotalSeconds -ge 8
       if ($cpu -ne $null) { $fanCpuS = $(if ($fanCpuS -eq $null) { [double]$cpu } else { $fanCpuS + $fa * ($cpu - $fanCpuS) }) } else { $fanCpuS = $null }
       if ($gpu -ne $null) { $fanGpuS = $(if ($fanGpuS -eq $null) { [double]$gpu } else { $fanGpuS + $fa * ($gpu - $fanGpuS) }) } else { $fanGpuS = $null }
       $rawCrit = Fan-Critical $cpu $gpu
-      $fanCritN = $(if ($rawCrit) { $fanCritN + 1 } else { 0 })
+      $fanCritSince = $(if ($rawCrit) { if ($fanCritSince) { $fanCritSince } else { $now } } else { $null })
       if (-not $paused) {
         $fc = if ($fanCpuS -ne $null) { [Math]::Round($fanCpuS, 1) } else { $null }; $fg = if ($fanGpuS -ne $null) { [Math]::Round($fanGpuS, 1) } else { $null }
         Learn-AutoFan $fc
-        $tempTxt = "CPU $fc C, GPU $fg C smoothed (now $cpu / $gpu)"
-        # critical = criticalSamples raw samples in a row at/above the critical point, or the (warmed-up) smoothed value there
-        $crit = $fanCritN -ge $FAN_CRIT_N -or ($fanSN -ge 5 -and (Fan-Critical $fc $fg))
+        $tempTxt = "CPU $fc C, GPU $fg C smoothed (now $cpu / $gpu)$(if ($GameMode) { ' [game mode]' })"
+        # critical = raw heat at/above the critical point for criticalSeconds, or the (warmed-up) smoothed value there
+        $crit = ($fanCritSince -and ($now - $fanCritSince).TotalSeconds -ge $FAN_CRIT_SEC) -or ($fanWarm -and (Fan-Critical $fc $fg))
         $demand = Fan-Demand $fc $fg 0
         $obs = Fan-ObservedPct
         if (-not $FanBoosted) {
           $fanRelSince = $null
           if ($crit) { Fan-Take "critical: $tempTxt" 100 100 }   # safety first: straight to 100 %, no ramp, no switch delay
-          elseif ($fanSN -ge 5 -and $obs -ne $null -and $demand -ge $obs + $FAN_ENGAGE_MARGIN -and ($now - $FanSwitchAt).TotalSeconds -ge $FAN_MIN_SWITCH) {
+          elseif ($fanWarm -and $obs -ne $null -and $demand -ge $obs + $FAN_ENGAGE_MARGIN -and ($now - $FanSwitchAt).TotalSeconds -ge $FAN_MIN_SWITCH) {
             Fan-Take ("curve {0:N0}% > fans {1:N0}%: {2}" -f $demand, $obs, $tempTxt) ([Math]::Round($obs)) $demand
           }
         } else {
           # keep control asserted if Control Center (or anything else) changed the fans while we need them
-          if ($FanInfo -and $FanPct -ne $null -and ($FanInfo.Fixed -ne 1 -or [Math]::Abs($FanInfo.Speed - (Pct-Duty $FanPct)) -gt 3) -and ($now - $lastFanFix).TotalSeconds -ge 30) {
+          if ($script:FanModeFresh -and $FanInfo -and $FanPct -ne $null -and ($FanInfo.Fixed -ne 1 -or [Math]::Abs($FanInfo.Speed - (Pct-Duty $FanPct)) -gt 3) -and ($now - $lastFanFix).TotalSeconds -ge 30) {
             Write-Log "fan mode was changed outside Thermal Guard ($($FanInfo.Mode), speed $($FanInfo.Speed)) - taking control again"
             $lastFanFix = $now
             Fan-Set 'SetCurrentFanStep' 0; Fan-Set 'SetAutoFanStatus' 0; Fan-Apply $FanPct; Fan-Set 'SetStepFanStatus' 1; Fan-Set 'SetFixedFanStatus' 1
@@ -686,22 +1038,22 @@ try {
             if ($fanRelSince -and ($now - $fanRelSince).TotalSeconds -ge 300 -and $FanBoosted) {
               # belt and braces: never stay in control for long once it is cool
               Write-Log "fan stuck guard: cool for 5 min but still controlled ($tempTxt) - ramping down and handing back"
-              Restore-Fan 'stuck guard'; $fanRelSince = $null; Read-Fan
+              Restore-Fan 'stuck guard'; $fanRelSince = $null; Read-Fan -Full
             }
             if ($fanRelSince -and ($now - $fanRelSince).TotalSeconds -ge $FAN_REL_SEC -and ($now - $FanRaiseAt).TotalSeconds -ge $FAN_MIN_HOLD -and ($now - $FanSwitchAt).TotalSeconds -ge $FAN_MIN_SWITCH) {
               $script:FanTarget = $floor
               if ($FanPct -le $floor + $FAN_HB_MARGIN) {
                 Write-Log ("fans: cool for {0}s and down to {1:N0}% (auto runs ~{2:N0}% here) - handing back to auto ({3})" -f [int]($now - $fanRelSince).TotalSeconds, $FanPct, $floor, $tempTxt)
-                Restore-Fan 'cooled down' -Abrupt; $fanRelSince = $null; Read-Fan
+                Restore-Fan 'cooled down' -Abrupt; $fanRelSince = $null; Read-Fan -Full
               }
             }
           }
-          if ($FanBoosted) { Fan-Step; Read-Fan }
+          if ($FanBoosted) { $fp0 = $FanPct; Fan-Step; if ($FanPct -ne $fp0) { $script:FanModeAt = [datetime]::MinValue }; Read-Fan }   # a duty change forces a fresh mode read
         }
       }
     }
 
-    if ($TestMode -or ($now - $lastInfo).TotalSeconds -ge 60 -or $CpuLevel -gt 0 -or $GpuThrottled) {
+    if (($now - $lastInfo).TotalSeconds -ge $(if ($TestMode -or $CpuLevel -gt 0 -or $GpuThrottled -or $FanBoosted -or $GameMode) { $TEMPS_EVERY - 0.05 } else { [Math]::Max(60.0, $TEMPS_EVERY) - 0.05 })) {
       Write-Log ("temps CPU={0} GPU={1} level={2} gpuThrottled={3}{5}{4}" -f $cpu, $gpu, $CpuLevel, $GpuThrottled, $(if ($TestMode -or $simActive) { " (SIM, $real)" } else { '' }), $(if ($FanInfo) { " fan=$($FanInfo.Mode) $($FanInfo.Rpm1)/$($FanInfo.Rpm2)rpm" } else { '' }))
       $lastInfo = $now
     }
@@ -715,13 +1067,21 @@ try {
       $Sync.Cpu = $cpu; $Sync.Gpu = $gpu; $Sync.Level = $CpuLevel; $Sync.MaxPct = $CPU_STEPS[$CpuLevel]
       $Sync.GpuThrottled = $GpuThrottled; $Sync.Paused = $paused; $Sync.HasNvidia = $HasNvidia; $Sync.Sim = $simActive
       $Sync.GpuMode = $(if ($Nv) { $Nv.Mode } else { $null }); $Sync.GpuLimitW = $(if ($Nv) { $Nv.Cur } else { $null }); $Sync.GpuDefaultW = $(if ($Nv) { $Nv.Default } else { $null }); $Sync.GpuClockCap = $(if ($Nv) { $Nv.LgcMhz } else { $null })
-      $Sync.FanOk = $FanOk; $Sync.FanBoost = $FanBoosted; $Sync.FanLevel = $FanLevel; $Sync.FanBoostPct = $(if ($FanPct -ne $null) { [int][Math]::Round($FanPct) } else { $null }); $Sync.FanTarget = $(if ($FanTarget -ne $null) { [int][Math]::Round($FanTarget) } else { $null }); $Sync.FanMax1 = $FAN_MAXRPM1; $Sync.FanMax2 = $FAN_MAXRPM2
+      $Sync.FanOk = $FanOk; $Sync.FanBoost = $FanBoosted; $Sync.FanLevel = $FanLevel; $Sync.FanBoostPct = $(if ($FanPct -ne $null) { [int][Math]::Round($FanPct) } else { $null }); $Sync.FanTarget = $(if ($FanTarget -ne $null) { [int][Math]::Round($FanTarget) } else { $null }); $Sync.FanMax1 = $FAN_MAXRPM1; $Sync.FanMax2 = $FAN_MAXRPM2; $Sync.GameMode = $GameMode; $Sync.GameName = $GameName
       if ($FanInfo) { $Sync.FanRpm1 = $FanInfo.Rpm1; $Sync.FanRpm2 = $FanInfo.Rpm2; $Sync.FanMode = $FanInfo.Mode } else { $Sync.FanMode = $null }
       $Sync.Reniced = $Reniced.Count; $Sync.Updated = Get-Date
       if ($Sync.Stop) { Write-Log 'exit requested from tray'; break }
     }
+    $script:HistSim = $simActive; Hist-Sample $now $cpu $gpu
+  if ($Sync -and -not $TestMode) { try { Update-Tick $now $cpu $gpu $simActive $paused } catch { Write-Log "update: error $($_.Exception.Message)" } }
     if (-not $TestMode -and -not $Sync -and (Test-Path $StopFile)) { Remove-Item $StopFile -Force -ErrorAction SilentlyContinue; Write-Log 'stop.flag found - stopping'; break }
-    Start-Sleep -Seconds $PollSeconds
+    $perfSw.Stop(); $perfN++; $perfMs += $perfSw.Elapsed.TotalMilliseconds; $perfMax = [Math]::Max($perfMax, $perfSw.Elapsed.TotalMilliseconds)
+    if (((Get-Date) - $perfAt).TotalSeconds -ge 600) {
+      $pc = (Get-Process -Id $PID).TotalProcessorTime.TotalSeconds; $el = ((Get-Date) - $perfAt).TotalSeconds
+      Write-Log ("perf: {0} polls in {1:N0}s, work avg {2:N0} ms / max {3:N0} ms per poll; process CPU {4:N1}% of one core (incl. window)" -f $perfN, $el, ($perfMs / [Math]::Max(1, $perfN)), $perfMax, (100 * ($pc - $perfCpu0) / $el))
+      $perfN = 0; $perfMs = 0.0; $perfMax = 0.0; $perfAt = Get-Date; $perfCpu0 = $pc
+    }
+    Start-Sleep -Milliseconds ([Math]::Max(100, [int]($PollSeconds * 1000 - ((Get-Date) - $loopT0).TotalMilliseconds)))
   }
 } catch {
   Write-Log "CRASH: $($_.Exception.Message)"; $exitCode = 1

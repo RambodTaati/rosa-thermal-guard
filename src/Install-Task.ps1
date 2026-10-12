@@ -2,7 +2,7 @@
 param([int]$Autostart = 1, [string]$Language = '')
 $ErrorActionPreference = 'Stop'
 $app = Split-Path -Parent $MyInvocation.MyCommand.Path
-if ($Language) {
+if ($Language -and $Language -ne 'keep') {
   $cfgPath = Join-Path $app 'config.json'
   $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
   $cfg.language = $Language
