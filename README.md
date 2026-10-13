@@ -101,8 +101,8 @@ gives you full speed back and hands the fans back to the firmware.
 - For fan control: a GIGABYTE laptop with its WMI interface (the GIGABYTE Control Center can stay installed)
 
 ## Install
-Download `RosaThermalGuard-Setup-1.3.2.exe` from the Releases page, check it against `SHA256SUMS.txt`
-(`Get-FileHash .\RosaThermalGuard-Setup-1.3.2.exe`), and run it.
+Download `RosaThermalGuard-Setup-1.3.3.exe` from the Releases page, check it against `SHA256SUMS.txt`
+(`Get-FileHash .\RosaThermalGuard-Setup-1.3.3.exe`), and run it.
 
 > The installer is **not code-signed**, so Windows SmartScreen may show "Windows protected your PC".
 > Click **More info → Run anyway** if you trust this release (verify the SHA-256 first).

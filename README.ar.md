@@ -92,8 +92,8 @@
 - للتحكم بالمراوح: حاسوب GIGABYTE بواجهة WMI الخاصة به (يمكن إبقاء Control Center مثبتًا)
 
 ## التثبيت
-نزّل `RosaThermalGuard-Setup-1.3.2.exe` من صفحة Releases، وقارنه بـ `SHA256SUMS.txt`
-(`Get-FileHash .\RosaThermalGuard-Setup-1.3.2.exe`) ثم شغّله.
+نزّل `RosaThermalGuard-Setup-1.3.3.exe` من صفحة Releases، وقارنه بـ `SHA256SUMS.txt`
+(`Get-FileHash .\RosaThermalGuard-Setup-1.3.3.exe`) ثم شغّله.
 
 > المثبّت **غير موقّع رقميًا**، لذا قد يعرض Windows SmartScreen رسالة «Windows protected your PC».
 > انقر **More info ← Run anyway** إذا كنت تثق بهذا الإصدار (تحقق من SHA-256 أولًا).

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.3 (2026-10-14)
+Installer/launcher fix only; same guard and SDK 1.2.3.
+* **Upgrade ends with Thermal running**: setup now starts the guard from its elevated context (`Start-Thermal.ps1`, which runs the task and waits until the guard is logging, up to 3 tries). In 1.3.2 the final start ran as the unelevated original user, was denied, and left Thermal stopped after an upgrade.
+* **Start menu / desktop shortcut**: if the guard is not running and the plain task start is denied, it asks once through UAC and starts it elevated. No UAC bypass.
+
 ## 1.3.2 (2026-10-14)
 Rosa Guard SDK 1.2.3. No change to protection, fan/power control, the window or the tray icon.
 * **SDK 1.2.3 (NetGuard crash fix)**: the SDK no longer disposes a pipe while another thread's overlapped read or write is still pending (only the reading thread disposes; others cancel and wait). This crashed NetGuard on 2026-10-13 right after it rejected Thermal.

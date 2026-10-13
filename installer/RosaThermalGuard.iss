@@ -77,7 +77,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Install-Task.ps1"" -Autostart {code:AutoFlag} -Language {code:AppLang}"; Flags: runhidden waituntilterminated; StatusMsg: "Registering scheduled task..."
-Filename: "{sys}\schtasks.exe"; Parameters: "/run /tn RosaThermalGuard"; Description: "{cm:LaunchNow}"; Flags: postinstall runhidden nowait
+; 1.3.3: always start Thermal from the ELEVATED setup context (runascurrentuser). Not a postinstall item: postinstall runs as the original, unelevated user, whose schtasks /run is denied for this task, so 1.3.2 upgrades ended with Thermal stopped.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Start-Thermal.ps1"""; Flags: runhidden waituntilterminated runascurrentuser; StatusMsg: "Starting Rosa Thermal Guard..."
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Remove-Task.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveTask"
