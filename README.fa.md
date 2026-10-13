@@ -96,8 +96,8 @@
 - برای کنترل فن: لپ‌تاپ GIGABYTE با رابط WMI آن (Control Center می‌تواند نصب بماند)
 
 ## نصب
-فایل `RosaThermalGuard-Setup-1.3.1.exe` را از صفحهٔ Releases دانلود کنید، با `SHA256SUMS.txt` مقایسه کنید
-(`Get-FileHash .\RosaThermalGuard-Setup-1.3.1.exe`) و اجرا کنید.
+فایل `RosaThermalGuard-Setup-1.3.2.exe` را از صفحهٔ Releases دانلود کنید، با `SHA256SUMS.txt` مقایسه کنید
+(`Get-FileHash .\RosaThermalGuard-Setup-1.3.2.exe`) و اجرا کنید.
 
 > نصب‌کننده **امضای دیجیتال ندارد**، پس ممکن است Windows SmartScreen پیام «Windows protected your PC» نشان دهد.
 > اگر به این نسخه اعتماد دارید (اول SHA-256 را بررسی کنید)، روی **More info ← Run anyway** بزنید.

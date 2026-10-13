@@ -24,16 +24,16 @@ $allowCool = [bool](CV $cs 'allowPeerCooldown' $true); $allowPower = [bool](CV $
 # production only: never pick up the SDK test-isolation variables
 foreach ($k in 'ROSAGUARD_TEST_PIPEPREFIX', 'ROSAGUARD_TEST_REGROOT', 'ROSAGUARD_TEST_SHAREDROOT', 'ROSAGUARD_TEST_SETTINGS', 'ROSAGUARD_TEST_STATE', 'ROSAGUARD_TEST_MUTEX', 'ROSAGUARD_TEST_NOSHOW') { [Environment]::SetEnvironmentVariable($k, $null, 'Process') }
 
-# resolve the shared SDK component: newest complete 1.x >= 1.2.2 (1.2.2: re-reads a peer registration on mismatch, so an upgraded Remote is accepted without restarting Thermal) under %CommonProgramFiles%\RosaGuard\SDK (contract 11).
+# resolve the shared SDK component: newest complete 1.x >= 1.2.3 (1.2.3: pipe-lifetime crash fix + back-off on permanent trust rejections; 1.2.2: re-reads a peer registration on mismatch) under %CommonProgramFiles%\RosaGuard\SDK (contract 11).
 # The 1.1.x "TabHost" component is never used any more (no tabs; its cmdlets are gone).
-$need = [version]'1.2.2'; $sdk = $null
+$need = [version]'1.2.3'; $sdk = $null
 $cf = $(if ($env:CommonProgramW6432) { $env:CommonProgramW6432 } else { $env:CommonProgramFiles })
 try {
   $base = Join-Path $cf 'RosaGuard\SDK'
   $sdk = Get-ChildItem $base -Directory -ErrorAction Stop | Where-Object { $v = $null; [version]::TryParse($_.Name, [ref]$v) -and $v.Major -eq 1 -and $v -ge $need -and (Test-Path (Join-Path $_.FullName 'rosaguard-component.json')) -and (Test-Path (Join-Path $_.FullName 'RosaGuard.psd1')) } |
          Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty FullName
 } catch {}
-if (-not $sdk) { $Sync.SuiteState = 'no-sdk'; SLog 'Rosa Guard shared SDK component (1.2.2+) not found - standalone'; return }
+if (-not $sdk) { $Sync.SuiteState = 'no-sdk'; SLog 'Rosa Guard shared SDK component (1.2.3+) not found - standalone'; return }
 
 $ver = '0.0.0'; try { $ver = (Get-Content (Join-Path $AppDir 'version.txt') -Raw).Trim() } catch {}
 $m = $null

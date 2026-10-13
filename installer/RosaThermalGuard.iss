@@ -95,7 +95,7 @@ Type: filesandordirs; Name: "{commonappdata}\RosaThermalGuard"
 #define RG_Capabilities   "gaming.detect"
 #define RG_ScriptPath     "TrayApp.ps1"
 #define RG_RunsElevated   "1"
-#define RG_SdkVersion     "1.2.2"
+#define RG_SdkVersion     "1.2.3"
 #ifndef RG_SdkSource
   ; build.ps1 passes /DRG_SdkSource=<official release folder> (RosaGuard-SDK-LATEST.txt), after verifying bin\SHA256SUMS
   #define RG_SdkSource    "..\..\RosaGuard-SDK"

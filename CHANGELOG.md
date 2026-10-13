@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2 (2026-10-14)
+Rosa Guard SDK 1.2.3. No change to protection, fan/power control, the window or the tray icon.
+* **SDK 1.2.3 (NetGuard crash fix)**: the SDK no longer disposes a pipe while another thread's overlapped read or write is still pending (only the reading thread disposes; others cancel and wait). This crashed NetGuard on 2026-10-13 right after it rejected Thermal.
+* **SDK 1.2.3 (fewer rejected retries)**: when a peer refuses Thermal for a reason that can't change by itself (for example an unelevated NetGuard that can't read an elevated Thermal's command line), Thermal retries after 1 min, doubling up to 1 h, and at once when either app is reinstalled, upgraded or restarted. The rejection is reported once instead of every minute. No trust rule changed.
+* Thermal now requires the shared SDK component 1.2.3+ (installed to `%CommonProgramFiles%\RosaGuard\SDK\1.2.3`).
+
 ## 1.3.1 (2026-10-12)
 Rosa Guard SDK 1.2.2 (local rebuild; first built with 1.2.0). No change to protection, the window or the tray icon.
 * **SDK 1.2.2 (Remote upgrade fix)**: right after Rosa Remote was upgraded, Thermal rejected it ("process image hash mismatch") until Thermal restarted, because the SDK

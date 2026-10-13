@@ -74,8 +74,8 @@
 - 风扇控制需要带 WMI 接口的技嘉笔记本（Control Center 可以保留）
 
 ## 安装
-从 Releases 页面下载 `RosaThermalGuard-Setup-1.3.1.exe`，对照 `SHA256SUMS.txt` 校验
-（`Get-FileHash .\RosaThermalGuard-Setup-1.3.1.exe`），然后运行。
+从 Releases 页面下载 `RosaThermalGuard-Setup-1.3.2.exe`，对照 `SHA256SUMS.txt` 校验
+（`Get-FileHash .\RosaThermalGuard-Setup-1.3.2.exe`），然后运行。
 
 > 安装程序**没有代码签名**，Windows SmartScreen 可能提示“Windows 已保护你的电脑”。
 > 如信任此版本（请先校验 SHA-256），点击 **更多信息 → 仍要运行**。
