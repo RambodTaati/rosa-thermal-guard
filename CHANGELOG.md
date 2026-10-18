@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.4 (2026-10-14)
+Temperature stays protected when a sensor or fan call stalls, and turbo stops being handed back into the next spike. Fan steps are unchanged: 2 % every 2 s (3 % in game mode), 100 % only at the existing critical temperatures.
+* **A hot package is no longer handed back its power limit on a short dip.** 100 °C goes straight to the 85 % cap, 95 °C takes the next step on that sample, and after a critical spike every step stays down for the spike hold instead of the 20 s cool-down. A raw 100 °C sample also uses the existing one-time jump of the fans to 100 %.
+* **The control loop no longer waits on LibreHardwareMonitor or GIGABYTE WMI.** Those reads run beside the loop. WMI calls give up after 2 s. A sample older than 2.5 s holds the current power step and fan target: it does not restore turbo, hand the fans back, or jump them. A real sleep/resume still resets smoothing; a stalled loop does not.
+* **Repeated spikes hold turbo off.** After 2 spikes within an hour, the 99 % step stays until the CPU has been under 75 °C for 10 minutes continuously. Deeper steps can still ease off. `spikeGuard.repeatCount` 0 turns this off. An upgraded `config.json` gets the same defaults without an edit.
+* **Time at or above 100 °C uses the real gap** between fresh samples. A sleep is a hole in that count. The priority scan no longer sleeps for 1 s inside the loop.
+* `nvidia-smi` on the hot path gives up after 2.5 s.
+
 ## 1.3.3 (2026-10-14)
 Installer/launcher fix only; same guard and SDK 1.2.3.
 * **Upgrade ends with Thermal running**: setup now starts the guard from its elevated context (`Start-Thermal.ps1`, which runs the task and waits until the guard is logging, up to 3 tries). In 1.3.2 the final start ran as the unelevated original user, was denied, and left Thermal stopped after an upgrade.

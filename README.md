@@ -34,7 +34,9 @@ gives you full speed back and hands the fans back to the firmware.
   2-s filter. One reading at/above 95 °C (`spikeGuard.fastC`), or a rise of at least 5 °C/s above 92 °C, turns turbo off
   at once (the 99 % step), and turbo stays off until there has been no such reading for 120 s (300 s in game mode);
   if a spike follows right after turbo returns, that hold doubles, up to 600 s (`cpu.maxTurboHoldSeconds`).
-  Deeper steps still need sustained heat, and the game keeps its priority. The CPU fan curve reaches 88 % by 92 °C
+  After 2 such spikes within an hour (`spikeGuard.repeatCount`, `repeatWindowSeconds`), turbo stays off until the CPU
+  has been under 75 °C for 10 minutes continuously (`stickyBelowC`, `stickySeconds`). A stalled sensor does not count
+  as that cool time, and it does not release cooling or move the fans. Deeper steps still need sustained heat, and the game keeps its priority. The CPU fan curve reaches 88 % by 92 °C
   (100 % still only at 95 °C). The report shows CPU/GPU time above 100 °C (total, episodes, longest) and marks those
   moments in red on the chart.
 - **Bearing-friendly fan control (GIGABYTE laptops)**, through GIGABYTE's own ACPI-WMI interface
