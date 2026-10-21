@@ -46,10 +46,14 @@ function Get-CpuStepTarget([int]$Level, [int]$StepCount, [double]$Cpu, [double]$
 }
 
 # Seconds the CPU must stay cool before a step is given back.
-# After a critical spike, every step waits out the spike hold, not the short 20 s cool-down.
+# The long anti-flap / post-spike hold guards only the return TO full turbo (stepping up
+# from the turbo-off state) - that is the spike source. Restoring an intermediate cap
+# (99/85/70 -> one notch up) uses the short cool-down, so a hot-but-cooling machine claws
+# its way back to the 99% cap instead of dead-locking on the deepest one ("stuck at 55 %").
+# $SpikeHold / $SpikeSeen are kept in the signature for the turbo-return contract; the
+# post-spike since-spike gate is applied at the turbo-return call site, not to cap steps.
 function Get-CpuRestoreWait([int]$Level, [double]$RestoreHold, [double]$CoolSeconds, [double]$SpikeHold, [bool]$SpikeSeen) {
   if ($Level -le 1) { return $RestoreHold }
-  if ($SpikeSeen) { return [Math]::Max($CoolSeconds, $SpikeHold) }
   return $CoolSeconds
 }
 

@@ -1410,7 +1410,11 @@ try {
         else {
           $spikeSeen = [bool]($SG_ON -and $lastSpikeAt)
           $wait = Get-CpuRestoreWait $CpuLevel $restoreHold $COOL_SECONDS (SG-Hold) $spikeSeen
-          $spikeClear = (-not $spikeSeen) -or (($now - $lastSpikeAt).TotalSeconds -ge (SG-Hold))
+          # The post-spike hold only guards the return to full turbo (stepping up FROM the
+          # turbo-off state). Cap step-ups recover on the short cool-down above, so a
+          # hot-but-cooling machine claws back to the 99% cap instead of dead-locking at 55 %.
+          if ($CpuLevel -gt 1) { $spikeClear = $true }
+          else { $spikeClear = (-not $spikeSeen) -or (($now - $lastSpikeAt).TotalSeconds -ge (SG-Hold)) }
           if (($now - $coolSince).TotalSeconds -ge $wait -and $spikeClear -and -not ($CpuLevel -eq 1 -and $lease -eq 'strong') -and (Test-AllowTurboReturn ([bool]$script:TurboSticky) ([int]$CpuLevel))) {
             Write-Log "CPU cool: $cpu C"
             if ($CpuLevel -gt 0) { Apply-CpuLevel ($CpuLevel - 1) }

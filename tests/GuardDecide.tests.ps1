@@ -36,9 +36,10 @@ Assert ((Get-CpuStepTarget 0 5 101 90 95 $false 0 6) -eq 2) '100 C goes straight
 Assert ((Get-CpuStepTarget 2 5 101 90 95 $false 1 6) -eq 3) 'still at 100 C takes the next step'
 Assert ((Get-CpuStepTarget 4 5 110 90 95 $true 20 6) -eq 4) 'the deepest step is the floor'
 
-Assert ((Get-CpuRestoreWait 2 120 20 120 $true) -eq 120) 'after a spike, 85 percent is not given back in 20 s'
-Assert ((Get-CpuRestoreWait 2 120 20 120 $false) -eq 20) 'a calm 85 percent cap still uses the short cool-down'
-Assert ((Get-CpuRestoreWait 1 300 20 120 $true) -eq 300) 'turbo-off keeps its own hold'
+Assert ((Get-CpuRestoreWait 2 120 20 120 $true) -eq 20) 'a cap step-up uses the short cool-down even after a spike'
+Assert ((Get-CpuRestoreWait 2 120 20 120 $false) -eq 20) 'a calm cap step-up uses the short cool-down'
+Assert ((Get-CpuRestoreWait 4 600 20 600 $true) -eq 20) 'the 55% cap recovers to 70% on the short cool-down, not the 600s spike hold'
+Assert ((Get-CpuRestoreWait 1 600 20 600 $true) -eq 600) 'the turbo return (99% -> 100%) keeps the full anti-flap hold'
 
 $spikes = New-Object System.Collections.Generic.List[datetime]
 $t0 = Get-Date
