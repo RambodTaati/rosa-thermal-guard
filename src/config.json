@@ -2,16 +2,14 @@
   "language": "auto",
   "pollSeconds": 1,
   "cpu": {
-    "throttleC": 90,
-    "criticalC": 95,
-    "restoreC": 80,
+    "throttleC": 94,
+    "criticalC": 96,
+    "restoreC": 88,
     "restoreAfterSeconds": 20,
     "maxStateSteps": [
       100,
       99,
-      85,
-      70,
-      55
+      85
     ],
     "minSecondsBetweenSteps": 6,
     "maxTurboHoldSeconds": 600,

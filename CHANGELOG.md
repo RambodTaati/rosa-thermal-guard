@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.6 (2026-10-25)
+Balanced gaming profile: the CPU no longer sinks to the 55 % floor under sustained gaming load — it now bottoms out at 85 %, with limiting that starts later and restores sooner. All safety (spike guard, turbo hold, restore-on-exit) is unchanged.
+* **CPU power floor raised to 85 %** (`cpu.maxStateSteps` → `[100, 99, 85]`): the previous `[100, 99, 85, 70, 55]` ladder let a hot game pull the CPU down to 55–70 %, which is exactly the lag seen in the app's own log. The deepest cap is now 85 %, and turbo is released first (99 %) before any 85 % cap.
+* **Limiting starts later, restores sooner** (`cpu.throttleC` 90 → 94, `cpu.criticalC` 95 → 96 as the hard backstop near Tjmax, `cpu.restoreC` 80 → 88): smoother frame pacing once the chip is hot.
+* **Safety untouched**: the ≥95 °C one-shot spike guard and all power-cap restore/relaunch behaviour are unchanged.
+
+## 1.3.5 (2026-10-22)
+The CPU power cap can climb back up again — fixes a regression where it stayed locked at 55 % and never returned after a cool-down.
+* **Level-aware restore** (new `Get-CpuRestoreWait`): the 99 / 85 / 70 / 55 % caps now release on the short ~20 s cool-down; only the return to full turbo keeps the ≥95 °C spike guard and the 600 s post-spike hold. `src/` + deployed `.ps1` are the single source of truth.
+
 ## 1.3.4 (2026-10-14)
 Temperature stays protected when a sensor or fan call stalls, and turbo stops being handed back into the next spike. Fan steps are unchanged: 2 % every 2 s (3 % in game mode), 100 % only at the existing critical temperatures.
 * **A hot package is no longer handed back its power limit on a short dip.** 100 °C goes straight to the 85 % cap, 95 °C takes the next step on that sample, and after a critical spike every step stays down for the spike hold instead of the 20 s cool-down. A raw 100 °C sample also uses the existing one-time jump of the fans to 100 %.
