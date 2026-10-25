@@ -766,7 +766,7 @@ $timer.Add_Tick({
     $lf = Join-Path $Root 'lang.flag'
     if (Test-Path $lf) { $c = (Get-Content $lf -Raw).Trim(); Remove-Item $lf -Force; Switch-Language $c }
     if (Test-Path (Join-Path $Root 'minimize.flag')) { Remove-Item (Join-Path $Root 'minimize.flag') -Force; $window.WindowState = 'Minimized'; UiLog ("after minimize: visible=" + $window.IsVisible) }
-    if (Test-Path (Join-Path $Root 'stop.flag')) { Exit-App; return }
+    if (Test-Path (Join-Path $Root 'stop.flag')) { Remove-Item (Join-Path $Root 'stop.flag') -ErrorAction SilentlyContinue; Exit-App; return }
 
     # keep the engine alive
     if ($guardHandle -and $guardHandle.IsCompleted -and -not $sync.Stop -and ($now - $lastGuardStart).TotalSeconds -gt 30) {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.7 (2026-10-26)
+The application can no longer self-terminate on launch when a stop flag is present — the cause of the "program closes" loop.
+* **`stop.flag` is now consumed on read** (`src/TrayApp.ps1` tray tick): the tray now removes the flag *before* exiting. Previously it called `Exit-App` without deleting the file, so a stale flag left by any shutdown/relaunch stuck in `ProgramData\RosaThermalGuard` and forced every subsequent launch into an immediate `start → "exit requested" → stop` loop that only manual clearing could break. It now behaves exactly like the sibling minimize/restart flags (read-then-delete).
+
 ## 1.3.6 (2026-10-25)
 Balanced gaming profile: the CPU no longer sinks to the 55 % floor under sustained gaming load — it now bottoms out at 85 %, with limiting that starts later and restores sooner. All safety (spike guard, turbo hold, restore-on-exit) is unchanged.
 * **CPU power floor raised to 85 %** (`cpu.maxStateSteps` → `[100, 99, 85]`): the previous `[100, 99, 85, 70, 55]` ladder let a hot game pull the CPU down to 55–70 %, which is exactly the lag seen in the app's own log. The deepest cap is now 85 %, and turbo is released first (99 %) before any 85 % cap.
